@@ -3,7 +3,6 @@ import { existsSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import {
   loadConfig,
-  saveConfig,
   readJson,
   readYaml,
   writeJson,
@@ -12,6 +11,7 @@ import {
   logger,
   describeTaskLlm,
   resolveFfmpegPath,
+  UnityConfigSchema,
   ProjectSummary,
   ScenarioSchema,
   ScriptSchema,
@@ -24,8 +24,11 @@ import {
   TimelineBuilder,
   recomputeScriptTimingFromAudio,
 } from '@auto-product-video-generator/ai';
-import { createPlatformRecorder } from '@auto-product-video-generator/recorder';
-import { VoicevoxClient } from '@auto-product-video-generator/voicevox';
+import {
+  captureSceneScreenshot,
+  createPlatformRecorder,
+} from '@auto-product-video-generator/recorder';
+import { VoicevoxClient, resolveVoiceProfiles } from '@auto-product-video-generator/voicevox';
 import { FfmpegRenderer } from '@auto-product-video-generator/renderer';
 import {
   resolveProjectSource,
@@ -38,18 +41,21 @@ import {
 } from '@auto-product-video-generator/source';
 import { exportArtifacts } from '../utils/export-artifacts.js';
 import { applyInferredTargetUrl } from '../utils/inferred-target.js';
+import { applyResolvedConfig, saveResolvedConfig } from '../utils/resolved-config.js';
 import { resolveWebStorageState } from '../utils/web-auth.js';
 
 interface BuildOptions {
   config?: string;
   type?: string;
   url?: string;
+  scenarioPrompt?: string;
   envFile?: string;
   skipAnalyze?: boolean;
   skipScenario?: boolean;
   skipRecord?: boolean;
   skipVoice?: boolean;
   subtitles?: boolean;
+  screenshots?: boolean;
   preview?: boolean;
   headed?: boolean;
   dryRun?: boolean;
@@ -67,6 +73,8 @@ export async function runBuild(options: BuildOptions): Promise<void> {
     config.target.autoDetectUrl = false;
   }
   if (options.type) config.video.type = options.type as typeof config.video.type;
+  if (options.scenarioPrompt) config.video.scenarioPrompt = options.scenarioPrompt;
+  if (options.skipAnalyze) config = await applyResolvedConfig(config);
 
   const workDir = config.output.workDir;
   await ensureDir(workDir);
@@ -75,7 +83,9 @@ export async function runBuild(options: BuildOptions): Promise<void> {
   logger.info(
     `Target:  ${config.target.autoDetectUrl ? 'auto-detect from source' : config.target.url}`
   );
-  logger.info(`Video:   ${config.video.type}, ~${config.video.duration}s`);
+  logger.info(
+    `Video:   ${config.video.type}, ${config.video.duration === undefined ? 'unrestricted length' : `~${config.video.duration}s`}`
+  );
   logger.info(`LLM (analyze):  ${describeTaskLlm(config.llm, 'analyze')}`);
   logger.info(`LLM (scenario): ${describeTaskLlm(config.llm, 'scenario')}`);
   logger.info('');
@@ -113,7 +123,11 @@ export async function runBuild(options: BuildOptions): Promise<void> {
   if (!options.skipAnalyze) {
     logger.step('1/5', 'Analyzing project source...');
     if (!dryRun) {
-      const sourceContext = await inspectProject(rootDir!, config.source.exclude);
+      const sourceContext = await inspectProject(
+        rootDir!,
+        config.source.exclude,
+        config.target.unity?.scenes
+      );
       await writeJson(contextPath, sourceContext);
 
       if (!config.source.startCommand) {
@@ -123,8 +137,7 @@ export async function runBuild(options: BuildOptions): Promise<void> {
         );
         if (detected) {
           config.source.startCommand = detected;
-          await saveConfig(configPath, config);
-          logger.info(`Detected dev server command '${detected}' — saved to ${configPath}.`);
+          logger.info(`Detected dev server command '${detected}'.`);
         }
       }
 
@@ -133,25 +146,37 @@ export async function runBuild(options: BuildOptions): Promise<void> {
         sourceContext,
         config.target.autoDetectUrl ? undefined : config.target.url
       );
-      if (applyInferredTargetUrl(config, summary)) await saveConfig(configPath, config);
+      applyInferredTargetUrl(config, summary);
       switch (summary.platform) {
         case 'android':
         case 'flutter':
         case 'react-native':
-        case 'unity':
           summary.setupSteps = [];
           config.target.type = 'android';
           config.target.android ||= { autoStartEmulator: true, autoInstall: true };
-          await saveConfig(configPath, config);
-          logger.info(`Enabled automatic Android build/emulator preparation in ${configPath}.`);
+          logger.info(`Enabled automatic Android build/emulator preparation.`);
+          break;
+        case 'unity':
+          summary.setupSteps = [];
+          config.target.type = 'unity';
+          config.target.unity = UnityConfigSchema.parse(config.target.unity || {});
+          if (
+            sourceContext.unity?.sceneSource === 'discovered' &&
+            !config.target.unity.scenes?.length
+          ) {
+            config.target.unity.scenes = sourceContext.unity.enabledScenes.map(
+              (scene) => scene.path
+            );
+          }
+          logger.info(`Enabled Unity Recorder scene capture (${sourceContext.unity?.sceneSource}).`);
           break;
         case 'cli':
           config.target.type = 'cli';
-          await saveConfig(configPath, config);
-          logger.info(`Enabled Docker-based CLI recording in ${configPath}.`);
+          logger.info(`Enabled Docker-based CLI recording.`);
           break;
       }
       await writeJson(summaryPath, summary);
+      await saveResolvedConfig(config, summary.platform);
       logger.success(`Saved: ${summaryPath}`);
     } else {
       logger.dryRun(`Would resolve source: ${config.source.repository || config.source.localPath}`);
@@ -185,21 +210,37 @@ export async function runBuild(options: BuildOptions): Promise<void> {
   if (!options.skipScenario) {
     logger.step('2/5', 'Generating scenario...');
     const generator = new ScenarioGenerator(scenarioLlm);
-    const result = await generator.generate(summary, config.video, config.target.url);
+    const voiceProfiles = resolveVoiceProfiles(config.voice, config.voicevox);
+    const generateEmotion = voiceProfiles.some((profile) => {
+      switch (profile.type) {
+        case 'voicevox':
+          return false;
+        case 'aitalk':
+          return profile.options.style === undefined;
+      }
+    });
+    const result = await generator.generate(
+      summary,
+      config.video,
+      config.target.url,
+      generateEmotion
+    );
     scenario = result.scenario;
     script = result.script;
 
     if (!dryRun) {
-      await writeYaml(scenarioPath, scenario);
-      await writeYaml(scriptPath, script);
       const subtitleGen = new SubtitleGenerator();
-      await writeFile(
-        srtPath,
-        subtitleGen.generateSrt(script, {
-          singleLine: config.video.singleLineSubtitles,
-        }),
-        'utf-8'
-      );
+      await Promise.all([
+        writeYaml(scenarioPath, scenario),
+        writeYaml(scriptPath, script),
+        writeFile(
+          srtPath,
+          subtitleGen.generateSrt(script, {
+            singleLine: config.video.singleLineSubtitles,
+          }),
+          'utf-8'
+        ),
+      ]);
       logger.success(`Saved scenario, script, subtitles`);
     } else {
       logger.dryRun(`Would write: ${scenarioPath}, ${scriptPath}, ${srtPath}`);
@@ -215,20 +256,25 @@ export async function runBuild(options: BuildOptions): Promise<void> {
         process.exit(1);
       }
     }
-    scenario = ScenarioSchema.parse(await readYaml(scenarioPath));
-    script = ScriptSchema.parse(await readYaml(scriptPath));
+    const [scenarioData, scriptData] = await Promise.all([
+      readYaml(scenarioPath),
+      readYaml(scriptPath),
+    ]);
+    scenario = ScenarioSchema.parse(scenarioData);
+    script = ScriptSchema.parse(scriptData);
   }
 
   // ── Step 3: Voice ────────────────────────────────────────────────────────
   if (!options.skipVoice) {
     logger.step('3/5', 'Synthesizing voice narration...');
     if (!dryRun) {
-      const voicevox = new VoicevoxClient(config.voicevox);
+      const profiles = resolveVoiceProfiles(config.voice, config.voicevox);
+      const voicevox = new VoicevoxClient(profiles);
       const healthy = await voicevox.checkHealth();
       if (!healthy) {
         throw new Error(
-          `VOICEVOX is not available at ${config.voicevox.host}. Start it with: ` +
-            'docker run --rm -p 50021:50021 voicevox/voicevox_engine:cpu-latest'
+          `One or more configured voice engines are not available: ` +
+            profiles.map((profile) => profile.url).join(', ')
         );
       } else {
         await voicevox.synthesizeAll(script, { outputDir: voiceDir, dryRun });
@@ -237,14 +283,16 @@ export async function runBuild(options: BuildOptions): Promise<void> {
           voiceDir,
           config.video.sceneGapSeconds
         );
-        await writeYaml(scriptPath, script);
-        await writeFile(
-          srtPath,
-          new SubtitleGenerator().generateSrt(script, {
-            singleLine: config.video.singleLineSubtitles,
-          }),
-          'utf-8'
-        );
+        await Promise.all([
+          writeYaml(scriptPath, script),
+          writeFile(
+            srtPath,
+            new SubtitleGenerator().generateSrt(script, {
+              singleLine: config.video.singleLineSubtitles,
+            }),
+            'utf-8'
+          ),
+        ]);
         logger.success('Updated script and subtitles from actual audio durations.');
       }
     } else {
@@ -260,14 +308,16 @@ export async function runBuild(options: BuildOptions): Promise<void> {
         }
       }
       script = await recomputeScriptTimingFromAudio(script, voiceDir, config.video.sceneGapSeconds);
-      await writeYaml(scriptPath, script);
-      await writeFile(
-        srtPath,
-        new SubtitleGenerator().generateSrt(script, {
-          singleLine: config.video.singleLineSubtitles,
-        }),
-        'utf-8'
-      );
+      await Promise.all([
+        writeYaml(scriptPath, script),
+        writeFile(
+          srtPath,
+          new SubtitleGenerator().generateSrt(script, {
+            singleLine: config.video.singleLineSubtitles,
+          }),
+          'utf-8'
+        ),
+      ]);
     }
   }
 
@@ -328,6 +378,15 @@ export async function runBuild(options: BuildOptions): Promise<void> {
           scriptScene.endTime - scriptScene.startTime
         );
       }
+      await recorder.finalize?.();
+      if (!dryRun && options.screenshots !== false && config.video.screenshots) {
+        for (const scene of scenario.scenes) {
+          await captureSceneScreenshot(
+            join(recordingsDir, `scene-${scene.id}.mp4`),
+            join(screenshotDir, `scene-${scene.id}.png`)
+          );
+        }
+      }
     } finally {
       await recorder.dispose?.();
       await startedApp?.stop();
@@ -344,7 +403,7 @@ export async function runBuild(options: BuildOptions): Promise<void> {
 
   const renderer = new FfmpegRenderer();
   await renderer.render(timeline, outputPath, {
-    noSubtitles: options.subtitles === false,
+    noSubtitles: options.subtitles === false || !config.video.subtitles,
     noVoice: options.skipVoice || false,
     preview: options.preview || false,
     dryRun,

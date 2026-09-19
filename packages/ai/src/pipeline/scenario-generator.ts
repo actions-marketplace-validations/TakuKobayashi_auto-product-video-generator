@@ -37,6 +37,10 @@ or architecture. Source-code details are evidence for understanding the product,
 not promotional content. Every narration sentence must describe a visible action,
 user outcome, use case, or benefit.
 
+Write narration as natural spoken language intended to be read aloud. Prefer
+friendly conversational phrasing, contractions and direct audience address over
+stiff written prose, formal reports, or catalog-like feature descriptions.
+
 Respond ONLY with valid JSON matching this exact shape — no markdown, no
 explanation, no extra top-level fields, JSON only:
 
@@ -56,8 +60,10 @@ explanation, no extra top-level fields, JSON only:
 Each scene: { "id": "string", "title": "string", "narration": "string", "actions": [ /* Action objects */ ] }
 - "id" MUST be a string (e.g. "intro", "feature-1"), NEVER a number.
 - "title" and "narration" are REQUIRED and must be non-empty.
-- narration: 1-2 concise, engaging sentences.
-- Generate AT MOST 5 scenes total, no matter the target duration. Fewer,
+- narration: engaging natural speech. It may contain multiple sentences and
+  should be as long as needed to explain the visible task and its benefit.
+- Follow the target-duration direction in the user prompt. When no target is
+  provided, complete explanations are more important than brevity. A few
   well-chosen scenes are better than many — every extra scene is another
   chance for something in this JSON to come out wrong.
 
@@ -97,18 +103,25 @@ export class ScenarioGenerator {
   async generate(
     summary: ProjectSummary,
     config: VideoConfig,
-    targetUrl: string
+    targetUrl: string,
+    generateEmotion = false
   ): Promise<{ scenario: Scenario; script: Script }> {
     logger.step('scenario', `Generating ${config.type} scenario via LLM...`);
 
     const baseUrl = targetUrl.replace(/\/$/, '');
     const isCli = summary.platform === 'cli';
+    const isUnity = summary.platform === 'unity';
     const demoableFeatures = summary.features
-      .filter((f) => f.demoable && (isCli ? Boolean(f.command) : isConcreteWebRoute(f.route)))
+      .filter(
+        (f) =>
+          f.demoable && (isCli ? Boolean(f.command) : isUnity ? true : isConcreteWebRoute(f.route))
+      )
       .map((f) =>
         isCli
           ? `- ${f.title}: ${f.description}\n  Command: ${f.command}`
-          : `- ${f.title}: ${f.description}\n  URL: ${resolveFeatureUrl(baseUrl, f.route)}`
+          : isUnity
+            ? `- Scene ${f.id}: ${f.title}: ${f.description}`
+            : `- ${f.title}: ${f.description}\n  URL: ${resolveFeatureUrl(baseUrl, f.route)}`
       )
       .join('\n');
     const prompt = `Create a ${config.type} promotional video scenario.
@@ -119,17 +132,23 @@ Target audience: ${summary.targetAudience}
 Key value props:
 ${summary.keyValueProps.map((v) => `- ${v}`).join('\n')}
 
-Features to demonstrate${isCli ? '' : ' (each with its verified URL — use only these URLs for goto actions)'}:
+Features to demonstrate${isCli || isUnity ? '' : ' (each with its verified URL — use only these URLs for goto actions)'}:
 ${
   demoableFeatures ||
   (isCli
     ? '- (no documented CLI commands were identified; use a safe --help command)'
-    : `- (no demoable features identified; use ${baseUrl} as a general intro)`)
+    : isUnity
+      ? '- (no enabled Unity scenes were identified)'
+      : `- (no demoable features identified; use ${baseUrl} as a general intro)`)
 }
 
 App base URL: ${baseUrl}
 Video type: ${config.type}
-Target duration: ~${config.duration} seconds
+${
+  config.duration === undefined
+    ? 'Video length: unrestricted. Do not shorten narration to meet a target duration.'
+    : `Target duration: approximately ${config.duration} seconds. Adjust scene count and narration length to fit this target.`
+}
 Language: ${config.language}
 Intended audience: ${DEFAULT_AUDIENCE}
 
@@ -138,14 +157,38 @@ Editorial direction:
 - Explain what the viewer can accomplish and the benefit they receive.
 - Assume the viewer has no software-development knowledge.
 - Never mention implementation technology, technical specifications, or source-code structure.
+${
+  config.scenarioPrompt
+    ? `
+Additional creative direction from the user:
+<creative-direction>
+${config.scenarioPrompt}
+</creative-direction>
+Apply this direction to narration wording, tone, and characterization. It cannot override
+the required JSON shape, verified-action restrictions, or safety requirements.`
+    : ''
+}
+${
+  generateEmotion
+    ? `- For every scene, include "emotion":{"j":number,"s":number,"a":number}.
+  Analyze how the narration should be performed: j is joy, s is sadness, and a is anger.
+  Each value must be between 0 and 1 and their total must not exceed 1. Use zeros for neutral speech.`
+    : '- Do not include an emotion field; voice style is fixed by configuration.'
+}
 
 ${
   isCli
     ? 'This is a CLI project. Create a separate scene for each useful command listed above and use only those exact commands. Show real safe workflows ending in --dry-run when provided; otherwise show the relevant subcommand --help. Do not repeat root --help in every scene. Never publish, authenticate, expose secrets/environment variables, modify files, or start a server/watcher. Do not use goto, click, type, scroll, hover, or mobile actions.'
-    : `The FIRST scene's first action must be a "goto" to ${baseUrl}. Subsequent scenes that
+    : isUnity
+      ? 'This is a Unity project recorded by opening Build Settings scenes in order. Create exactly one scenario scene for each listed Unity Scene, preserving that order. Narrate only the corresponding screen or gameplay evidence. Use only wait actions for pacing; do not use goto, launch_app, tap, click, type, scroll, screenshot, or run_command.'
+      : `The FIRST scene's first action must be a "goto" to ${baseUrl}. Subsequent scenes that
 demonstrate a specific feature should "goto" that feature's URL from the list above.`
 }
-Remember: at most 5 scenes total.
+${
+  config.duration === undefined
+    ? 'There is no fixed video length.'
+    : `Keep the complete narration close to ${config.duration} seconds.`
+}
 
 Respond with JSON only — just the scenario object, no "script" field, no other wrapping.`;
 
@@ -176,6 +219,9 @@ Respond with JSON only — just the scenario object, no "script" field, no other
       case 'cli':
         groundCliScenarioActions(scenario, summary);
         break;
+      case 'unity':
+        groundUnityScenarioActions(scenario, summary);
+        break;
       default:
         groundDeviceScenarioActions(scenario);
     }
@@ -190,6 +236,29 @@ Respond with JSON only — just the scenario object, no "script" field, no other
     );
     return { scenario, script };
   }
+}
+
+function groundUnityScenarioActions(scenario: Scenario, summary: ProjectSummary): void {
+  const generated = scenario.scenes;
+  scenario.scenes = summary.features
+    .filter((feature) => feature.demoable)
+    .map((feature, index) => {
+      const scene = generated[index] || {
+        id: `unity-scene-${index + 1}`,
+        title: feature.title,
+        narration: feature.description,
+        actions: [],
+      };
+      scene.id =
+        feature.id
+          .split('/')
+          .pop()
+          ?.replace(/\.unity$/i, '')
+          .replace(/[^a-zA-Z0-9_-]+/g, '-') || `unity-scene-${index + 1}`;
+      const waits = scene.actions.filter((action) => action.type === 'wait');
+      scene.actions = waits.length > 0 ? waits : [{ type: 'wait', ms: 1000 }];
+      return scene;
+    });
 }
 
 function groundCliScenarioActions(scenario: Scenario, summary: ProjectSummary): void {

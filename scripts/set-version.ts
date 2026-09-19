@@ -13,7 +13,7 @@ async function main(): Promise<void> {
 
   if (!VERSION_PATTERN.test(requestedVersion)) {
     throw new Error(
-      `Invalid release version: ${requestedVersion}. Use SemVer without build metadata, for example 0.3.0 or 0.3.0-beta.1.`,
+      `Invalid release version: ${requestedVersion}. Use SemVer without build metadata, for example 0.3.0 or 0.3.0-beta.1.`
     );
   }
 
@@ -27,7 +27,7 @@ async function main(): Promise<void> {
 
   if (packageJson.name !== 'auto-product-video-generator') {
     throw new Error(
-      `Unexpected publish package in ${packageJsonPath}: ${packageJson.name ?? '(missing)'}`,
+      `Unexpected publish package in ${packageJsonPath}: ${packageJson.name ?? '(missing)'}`
     );
   }
 
@@ -37,7 +37,7 @@ async function main(): Promise<void> {
     const previousVersion = packageJson.version ?? '(missing)';
     const updatedSource = packageJsonSource.replace(
       /("version"\s*:\s*")[^"]+("\s*,)/,
-      (_match, prefix: string, suffix: string) => `${prefix}${requestedVersion}${suffix}`,
+      (_match, prefix: string, suffix: string) => `${prefix}${requestedVersion}${suffix}`
     );
     if (updatedSource === packageJsonSource) {
       throw new Error(`Unable to update the version field in ${packageJsonPath}`);

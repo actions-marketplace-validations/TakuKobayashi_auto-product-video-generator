@@ -158,10 +158,22 @@ export const EffectSchema = z.discriminatedUnion('type', [
 
 // --- Scene & Scenario ---
 
+export const NarrationEmotionSchema = z
+  .object({
+    j: z.number().min(0).max(1),
+    s: z.number().min(0).max(1),
+    a: z.number().min(0).max(1),
+  })
+  .refine((emotion) => emotion.j + emotion.s + emotion.a <= 1, {
+    message: 'Narration emotion values must total 1.0 or less',
+  });
+export type NarrationEmotion = z.infer<typeof NarrationEmotionSchema>;
+
 export const SceneSchema = z.object({
   id: z.string(),
   title: z.string(),
   narration: z.string(),
+  emotion: NarrationEmotionSchema.optional(),
   duration: z.number().positive().optional(),
   actions: z.array(ActionSchema).default([]),
   effects: z.array(EffectSchema).optional(),
@@ -214,6 +226,7 @@ export const ScenarioSchema = z.object({
 export const ScriptSceneSchema = z.object({
   id: z.string(),
   narration: z.string(),
+  emotion: NarrationEmotionSchema.optional(),
   startTime: z.number().nonnegative(),
   endTime: z.number().positive(),
   voiceFile: z.string(),

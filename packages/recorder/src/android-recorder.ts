@@ -1,9 +1,11 @@
 import { spawn } from 'node:child_process';
-import { mkdir, readFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import {
+  getAudioDurationSeconds,
   logger,
+  resolveFfmpegPath,
   type Action,
   type Scene,
   type VideoConfig,
@@ -11,6 +13,7 @@ import {
 import type { PlatformRecorder, PlatformRecordOptions } from './types.js';
 import {
   prepareAndroidProject,
+  stopPreparedAndroidTarget,
   type AndroidProjectContext,
   type AndroidProjectOptions,
   type PreparedAndroidTarget,
@@ -21,6 +24,7 @@ export type AndroidTarget = AndroidProjectOptions;
 export class AndroidRecorder implements PlatformRecorder {
   private prepared?: Promise<PreparedAndroidTarget>;
   private runtime!: PreparedAndroidTarget;
+  private disposed = false;
 
   constructor(
     private readonly target: AndroidTarget,
@@ -29,7 +33,7 @@ export class AndroidRecorder implements PlatformRecorder {
 
   async recordScene(
     scene: Scene,
-    _config: VideoConfig,
+    config: VideoConfig,
     options: PlatformRecordOptions,
     targetDurationSeconds = 1,
     actionDurationSeconds = targetDurationSeconds
@@ -43,44 +47,90 @@ export class AndroidRecorder implements PlatformRecorder {
       return outputPath;
     }
 
-    await mkdir(options.outputDir, { recursive: true });
-    await mkdir(options.screenshotDir, { recursive: true });
+    await Promise.all([
+      mkdir(options.outputDir, { recursive: true }),
+      mkdir(options.screenshotDir, { recursive: true }),
+    ]);
     await this.prepare();
     await this.assertDeviceReady();
 
+    let actions = scene.actions;
+    if (actions[0]?.type === 'launch_app') {
+      await this.executeAction(actions[0], options.screenshotDir);
+      actions = actions.slice(1);
+    }
+
+    const displaySize = await this.androidDisplaySize();
+    const recordingSize = resolveAndroidRecordingSize(config.resolution, displaySize);
     const remotePath = `/sdcard/apvg-${safeName(scene.id)}.mp4`;
     await this.adb(['shell', 'rm', '-f', remotePath]);
+    const recordingLimitSeconds = Math.max(1, Math.ceil(targetDurationSeconds));
     const recorder = this.spawnAdb([
       'shell',
       'screenrecord',
+      '--verbose',
+      '--size',
+      recordingSize,
       '--time-limit',
-      String(Math.max(1, Math.ceil(targetDurationSeconds + 2))),
+      String(recordingLimitSeconds),
       remotePath,
     ]);
+    let recorderStdout = '';
+    let recorderStderr = '';
+    recorder.stdout?.on('data', (chunk) => {
+      recorderStdout += chunk;
+    });
+    recorder.stderr?.on('data', (chunk) => {
+      recorderStderr += chunk;
+    });
     const startedAt = Date.now();
     let failure: unknown;
     try {
-      for (let index = 0; index < scene.actions.length; index++) {
-        await this.executeAction(scene.actions[index], options.screenshotDir);
+      for (let index = 0; index < actions.length; index++) {
+        await this.executeAction(actions[index], options.screenshotDir);
         const milestone =
-          (actionDurationSeconds * 1000 * (index + 1)) / Math.max(1, scene.actions.length);
+          (actionDurationSeconds * 1000 * (index + 1)) / Math.max(1, actions.length);
         await wait(Math.max(0, milestone - (Date.now() - startedAt)));
       }
       await wait(Math.max(0, targetDurationSeconds * 1000 - (Date.now() - startedAt)));
     } catch (error) {
       failure = error;
     } finally {
-      recorder.kill('SIGINT');
-      await waitForExit(recorder, 5000);
+      let recorderExited = await waitForExit(recorder, failure ? 0 : 3000);
+      if (!recorderExited) {
+        await this.adb(['shell', 'sh', '-c', 'kill -2 $(pidof screenrecord)']).catch(() => '');
+        recorderExited = await waitForExit(recorder, 5000);
+      }
+      if (!recorderExited) {
+        recorder.kill('SIGTERM');
+        await waitForExit(recorder, 2000);
+      }
+      if (!failure && recorder.exitCode !== 0) {
+        failure = new Error(
+          `Android screenrecord exited with code ${recorder.exitCode}: ` +
+            (recorderStderr.trim() || 'no error output')
+        );
+      }
+      const recorderOutput = `${recorderStdout}\n${recorderStderr}`.trim();
+      if (recorderOutput) logger.dim(`  screenrecord: ${recorderOutput}`);
       await this.adb(['pull', remotePath, outputPath]);
       await this.adb(['shell', 'rm', '-f', remotePath]);
     }
     if (!existsSync(outputPath))
       throw new Error(`Android recording was not created: ${outputPath}`);
+    await normalizeAndroidRecording(outputPath, targetDurationSeconds, config.fps);
+    const recordedDuration = await getAudioDurationSeconds(outputPath);
+    if (recordedDuration < Math.max(1, targetDurationSeconds - 1)) {
+      throw new Error(
+        `Android screenrecord created only ${recordedDuration.toFixed(2)}s for a ` +
+          `${targetDurationSeconds.toFixed(2)}s scene.`
+      );
+    }
     logger.success(`Saved: ${outputPath}`);
     if (failure)
       throw new Error(
-        `Failed to record Android scene '${scene.id}'. Partial recording was saved.`,
+        `Failed to record Android scene '${scene.id}': ${errorMessage(failure)}. ` +
+          'Partial recording was saved.',
         { cause: failure }
       );
     return outputPath;
@@ -98,18 +148,19 @@ export class AndroidRecorder implements PlatformRecorder {
     }
   }
 
+  private async androidDisplaySize(): Promise<string | undefined> {
+    const output = await this.adb(['shell', 'wm', 'size']).catch(() => '');
+    return output.match(/(?:Override|Physical) size:\s*(\d+x\d+)/)?.[1];
+  }
+
   private async executeAction(action: Action, screenshotDir: string): Promise<void> {
     switch (action.type) {
       case 'launch_app':
         if (this.runtime.activity) {
-          await this.adb([
-            'shell',
-            'am',
-            'start',
-            '-W',
-            '-n',
-            `${this.runtime.package}/${this.runtime.activity}`,
-          ]);
+          const component = this.runtime.activity.includes('/')
+            ? this.runtime.activity
+            : `${this.runtime.package}/${this.runtime.activity}`;
+          await this.adb(['shell', 'am', 'start', '-W', '-n', component]);
         } else {
           await this.adb([
             'shell',
@@ -223,6 +274,12 @@ export class AndroidRecorder implements PlatformRecorder {
     this.runtime = await this.prepared;
   }
 
+  async dispose(): Promise<void> {
+    if (this.disposed || !this.runtime) return;
+    this.disposed = true;
+    await stopPreparedAndroidTarget(this.runtime);
+  }
+
   private adb(args: string[]): Promise<string> {
     return run(this.runtime.adbPath, this.adbArgs(args));
   }
@@ -232,6 +289,71 @@ export class AndroidRecorder implements PlatformRecorder {
   private adbArgs(args: string[]): string[] {
     return ['-s', this.runtime.serial, ...args];
   }
+}
+
+export function resolveAndroidRecordingSize(
+  configuredResolution: string,
+  displaySize?: string
+): string {
+  const [configuredWidth, configuredHeight] = configuredResolution.split('x').map(Number);
+  const [displayWidth, displayHeight] = (displaySize || configuredResolution).split('x').map(Number);
+  const displayIsPortrait = displayHeight > displayWidth;
+  const configuredIsPortrait = configuredHeight > configuredWidth;
+  if (displayIsPortrait === configuredIsPortrait) return configuredResolution;
+  return `${configuredHeight}x${configuredWidth}`;
+}
+
+async function normalizeAndroidRecording(
+  outputPath: string,
+  targetDurationSeconds: number,
+  fps: number
+): Promise<void> {
+  const normalizedPath = `${outputPath}.normalized.mp4`;
+  try {
+    await run(
+      resolveFfmpegPath(),
+      buildAndroidNormalizationArguments(
+        outputPath,
+        normalizedPath,
+        targetDurationSeconds,
+        fps
+      )
+    );
+    await rm(outputPath);
+    await rename(normalizedPath, outputPath);
+  } catch (error) {
+    await rm(normalizedPath, { force: true }).catch(() => undefined);
+    throw error;
+  }
+}
+
+export function buildAndroidNormalizationArguments(
+  inputPath: string,
+  outputPath: string,
+  targetDurationSeconds: number,
+  fps: number
+): string[] {
+  return [
+    '-y',
+    '-r',
+    String(fps),
+    '-i',
+    inputPath,
+    '-vf',
+    `tpad=stop_mode=clone:stop_duration=${targetDurationSeconds + 1}`,
+    '-t',
+    targetDurationSeconds.toFixed(3),
+    '-r',
+    String(fps),
+    '-an',
+    '-c:v',
+    'libx264',
+    '-pix_fmt',
+    'yuv420p',
+    '-movflags',
+    '+faststart',
+    outputPath,
+  ];
 }
 
 function run(command: string, args: string[]): Promise<string> {
@@ -256,15 +378,18 @@ function run(command: string, args: string[]): Promise<string> {
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
-function waitForExit(child: ReturnType<typeof spawn>, timeoutMs: number): Promise<void> {
+function waitForExit(child: ReturnType<typeof spawn>, timeoutMs: number): Promise<boolean> {
   return new Promise((resolve) => {
-    if (child.exitCode !== null) return resolve();
-    const timer = setTimeout(resolve, timeoutMs);
+    if (child.exitCode !== null) return resolve(true);
+    const timer = setTimeout(() => resolve(false), timeoutMs);
     child.once('close', () => {
       clearTimeout(timer);
-      resolve();
+      resolve(true);
     });
   });
+}
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 function attr(node: string, name: string): string | undefined {
   return node

@@ -45,6 +45,11 @@ export function initCommand(): Command {
       '--android-sdk <path>',
       'Android SDK root (otherwise ANDROID_SDK_ROOT/ANDROID_HOME/PATH)'
     )
+    .option('--unity-editor <path>', 'path to the Unity Editor executable')
+    .option(
+      '--unity-scenes <paths>',
+      'comma-separated Unity scene paths (default: Build Settings or auto-discovered scenes)'
+    )
     .option('--force', 'overwrite an existing apvg.config.yml')
     .option('--dry-run', 'preview config without writing files')
     .action(async (directory: string, options: Record<string, string | boolean>) => {

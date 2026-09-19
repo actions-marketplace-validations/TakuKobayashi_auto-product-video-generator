@@ -8,12 +8,13 @@ import {
   writeYaml,
   logger,
   ScriptSchema,
+  VoiceProfile,
 } from '@auto-product-video-generator/core';
 import {
   recomputeScriptTimingFromAudio,
   SubtitleGenerator,
 } from '@auto-product-video-generator/ai';
-import { VoicevoxClient } from '@auto-product-video-generator/voicevox';
+import { VoicevoxClient, resolveVoiceProfiles } from '@auto-product-video-generator/voicevox';
 
 interface VoiceOptions {
   config?: string;
@@ -23,6 +24,24 @@ interface VoiceOptions {
   speaker?: string;
   scene?: string;
   dryRun?: boolean;
+}
+
+function overrideVoicevoxSpeaker(profile: VoiceProfile, speakerId: number): VoiceProfile {
+  switch (profile.type) {
+    case 'voicevox':
+      return { ...profile, speakerId };
+    case 'aitalk':
+      return profile;
+  }
+}
+
+function describeVoiceProfile(profile: VoiceProfile): string {
+  switch (profile.type) {
+    case 'voicevox':
+      return `${profile.name ?? profile.type} (${profile.url}, speaker=${profile.speakerId})`;
+    case 'aitalk':
+      return `${profile.name ?? profile.type} (${profile.url}, speaker=${profile.speakerName})`;
+  }
 }
 
 export async function runVoice(options: VoiceOptions): Promise<void> {
@@ -42,24 +61,26 @@ export async function runVoice(options: VoiceOptions): Promise<void> {
   const rawScript = await readYaml(scriptPath);
   const script = ScriptSchema.parse(rawScript);
 
-  const voicevoxConfig = {
-    ...config.voicevox,
-    ...(options.speaker ? { speakerId: parseInt(options.speaker, 10) } : {}),
-  };
+  let profiles = resolveVoiceProfiles(config.voice, config.voicevox);
+  if (options.speaker) {
+    const speakerId = parseInt(options.speaker, 10);
+    profiles = profiles.map((profile) => overrideVoicevoxSpeaker(profile, speakerId));
+  }
 
   const voiceDir = options.voiceDir || join(workDir, 'voice');
   const srtPath = options.subtitles || join(workDir, 'subtitles.srt');
   await Promise.all([voiceDir, dirname(scriptPath), dirname(srtPath)].map(ensureDir));
 
-  logger.info(`VOICEVOX host:  ${voicevoxConfig.host}`);
-  logger.info(`Speaker ID:     ${voicevoxConfig.speakerId}`);
+  profiles.forEach((profile, index) =>
+    logger.info(`Voice ${index + 1}:       ${describeVoiceProfile(profile)}`)
+  );
   logger.info(`Output dir:     ${voiceDir}`);
 
   if (!options.dryRun) {
-    const client = new VoicevoxClient(voicevoxConfig);
+    const client = new VoicevoxClient(profiles);
     const healthy = await client.checkHealth();
     if (!healthy) {
-      logger.error(`VOICEVOX Engine is not reachable at ${voicevoxConfig.host}`);
+      logger.error(`One or more voice engines are not reachable.`);
       logger.error(
         'Start it with: docker run --rm -p 50021:50021 voicevox/voicevox_engine:cpu-latest'
       );
@@ -67,7 +88,7 @@ export async function runVoice(options: VoiceOptions): Promise<void> {
     }
   }
 
-  const client = new VoicevoxClient(voicevoxConfig);
+  const client = new VoicevoxClient(profiles);
   await client.synthesizeAll(script, {
     outputDir: voiceDir,
     dryRun: options.dryRun || false,

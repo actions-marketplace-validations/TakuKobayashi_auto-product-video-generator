@@ -5,7 +5,8 @@
   "description": "Platform recording drivers for auto-product-video-generator",
   "files": [
     "dist/",
-    "docker/"
+    "docker/",
+    "unity/Assets/APVG/Editor/"
   ],
   "license": "MIT",
   "repository": {

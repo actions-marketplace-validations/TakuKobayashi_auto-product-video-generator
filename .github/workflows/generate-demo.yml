@@ -5,6 +5,42 @@ on:
     branches:
       - generate-video
   workflow_dispatch:
+    inputs:
+      repository:
+        description: Git repository URL to analyze; empty uses this repository
+        required: false
+        type: string
+        default: ''
+      ref:
+        description: Branch, tag, or commit of the target repository
+        required: false
+        type: string
+        default: ''
+      project-path:
+        description: Unity/application path inside a monorepo; normally auto-detected
+        required: false
+        type: string
+        default: ''
+      apvg-version:
+        description: Published APVG npm version used by the Marketplace action
+        required: false
+        type: string
+        default: latest
+      unity-hub-version:
+        description: Unity Hub version used to install the Unity Editor
+        required: false
+        type: string
+        default: '3.21.1'
+      unity-version:
+        description: Unity Editor override; versions before 2022.2 use the latest stable release
+        required: false
+        type: string
+        default: ''
+      cache-enabled:
+        description: Cache Android SDK/emulator, Unity Editor, Unity Hub, Ollama models, and Playwright Chromium
+        required: false
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -23,16 +59,43 @@ jobs:
       - name: Check out action repository
         uses: actions/checkout@v6
 
+      - name: Configure repository SSH key
+        env:
+          REPOSITORY: ${{ inputs.repository || '' }}
+          SSH_KEY: ${{ secrets.SSH_KEY }}
+        run: |
+          [[ "$REPOSITORY" == ssh://* || "$REPOSITORY" =~ ^[^/@:]+@[^/:]+: ]] || exit 0
+          [[ -n "$SSH_KEY" ]] || {
+            echo "::error::SSH_KEY secret is required for an SSH repository URL"
+            exit 1
+          }
+          ssh_auth_sock="$RUNNER_TEMP/apvg-ssh-agent.sock"
+          ssh-agent -a "$ssh_auth_sock" >/dev/null
+          SSH_AUTH_SOCK="$ssh_auth_sock" ssh-add - <<< "$SSH_KEY"
+          echo "SSH_AUTH_SOCK=$ssh_auth_sock" >> "$GITHUB_ENV"
+          echo "GIT_SSH_COMMAND=ssh -o StrictHostKeyChecking=accept-new" >> "$GITHUB_ENV"
+
+      # Unity-specific installation, licensing, Xvfb, and WebM-to-MP4
+      # conversion run conditionally inside action.yml after project analysis.
       - name: Generate promotional video
         id: apvg
         uses: ./
         with:
-          apvg-version: latest
+          apvg-version: ${{ inputs.apvg-version || 'latest' }}
+          repository: ${{ inputs.repository || '' }}
+          ref: ${{ inputs.ref || '' }}
+          project-path: ${{ inputs.project-path || '' }}
           video-type: demo
           ollama-model: qwen2.5:7b-instruct
           output-directory: apvg-output
+          export-remotion: 'true'
+          unity-email: ${{ secrets.UNITY_EMAIL }}
+          unity-password: ${{ secrets.UNITY_PASSWORD }}
+          unity-hub-version: ${{ inputs['unity-hub-version'] }}
+          unity-version: ${{ inputs['unity-version'] }}
+          cache-enabled: ${{ github.event_name != 'workflow_dispatch' || inputs['cache-enabled'] }}
 
-      - name: Upload final video and intermediate artifacts
+      - name: Upload final video, Remotion project, and intermediate artifacts
         uses: actions/upload-artifact@v7
         with:
           name: promotional-video-${{ github.run_number }}

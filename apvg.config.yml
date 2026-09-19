@@ -1,8 +1,8 @@
 project:
-  name: My Web App
-  description: A sample web application
+  name: auto-product-video-generator
+  description: ""
 source:
-  repository: https://github.com/your-org/your-repo.git
+  localPath: ./
   installDeps: false
   # environmentFile: /path/to/project.env
   platformPriority:
@@ -16,50 +16,61 @@ source:
     - desktop
     - other
   exclude: []
-  startCommand: npm run dev
-target:
-  url: http://localhost:3000
-  autoDetectUrl: false
-  type: web
-  cli:
-    image: apvg-cli-recorder:latest
-    shell: /bin/bash
-    columns: 100
-    rows: 30
-    fontSize: 22
-    allowedCommands: []
-    deniedCommandPatterns:
-      - publish
-      - login
-      - logout
-      - token
-      - secret
-      - clean
-      - remove
-      - delete
-      - serve
-      - start
-      - watch
-      - generate
-      - voice
-      - record
-      - render
 video:
   type: demo
-  duration: 60
   resolution: 1920x1080
   fps: 30
   language: ja
+  subtitles: true # false to render without subtitles
   singleLineSubtitles: true
   pageReadyWaitSeconds: 2
   sceneGapSeconds: 1
 llm:
   provider: ollama
   model: qwen2.5:7b-instruct
-  ollamaHost: http://localhost:11434
-voicevox:
-  host: http://localhost:50021
-  speakerId: 3
+  ollamaHost: http://127.0.0.1:11434
+voice:
+  # Every string in this YAML supports ${ANY_ENV_KEY}. A .env beside this file
+  # is loaded automatically. Set envFile to use another file as well.
+  # envFile: ./.env.local
+  profiles:
+    - name: narrator-1
+      type: voicevox
+      url: http://localhost:50021
+      speakerId: 1
+    - name: narrator-2
+      type: voicevox
+      url: http://localhost:50021
+      speakerId: 2
+    # AITalk 5 WebAPI can be mixed with VOICEVOX. Credentials are read from
+    # AITALK_USERNAME and AITALK_PASSWORD by default.
+    # - name: narrator-aitalk
+    #   type: aitalk
+    #   url: https://webapi.aitalk.jp/webapi/v5/ttsget.php
+    #   speakerName: nozomi
+    #   username: ${AITALK_USERNAME}
+    #   password: ${AITALK_PASSWORD}
+    #   AITalk ttsget options:
+    #   https://www.ai-j.jp/manual/business/webapi/5/modules/Api/TTSGet.html
+    #   options:
+    #     use_udic: true
+    #     ext: wav
+    #     fs: 48000
+    #     bit: 16
+    #     channels: 1
+    #     mvolume: 1.0
+    #     volume: 1.0
+    #     speed: 1.0
+    #     pitch: 1.0
+    #     range: 1.0
+    #     style:
+    #       j: 0.5 # joy
+    #       s: 0.15 # sadness
+    #       a: 0.35 # anger
+    #     spause: 150
+    #     lpause: 370
+    #     epause: 800
+    #     tpause: 0
 output:
   dir: ./output
   workDir: ./.apvg

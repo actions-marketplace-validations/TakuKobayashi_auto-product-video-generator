@@ -16,10 +16,13 @@ import {
   ScenarioGenerator,
   SubtitleGenerator,
 } from '@auto-product-video-generator/ai';
+import { resolveVoiceProfiles } from '@auto-product-video-generator/voicevox';
+import { applyResolvedConfig } from '../utils/resolved-config.js';
 
 interface ScenarioGenerateOptions {
   config?: string;
   type?: string;
+  prompt?: string;
   projectSummary?: string;
   scenario?: string;
   script?: string;
@@ -32,7 +35,7 @@ export async function runScenarioGenerate(options: ScenarioGenerateOptions): Pro
   logger.header('apvg video scenario generate');
 
   const configPath = options.config || 'apvg.config.yml';
-  const config = await loadConfig(configPath);
+  const config = await applyResolvedConfig(await loadConfig(configPath));
 
   const workDir = config.output.workDir;
   const summaryPath = options.projectSummary || join(workDir, 'project-summary.json');
@@ -55,11 +58,14 @@ export async function runScenarioGenerate(options: ScenarioGenerateOptions): Pro
   const videoConfig = {
     ...config.video,
     ...(options.type ? { type: options.type as 'teaser' | 'shorts' | 'demo' | 'tutorial' } : {}),
+    ...(options.prompt ? { scenarioPrompt: options.prompt } : {}),
   };
 
   if (options.dryRun) {
     logger.dryRun(`Would generate scenario for: ${summary.name}`);
-    logger.dryRun(`Video type: ${videoConfig.type}, duration: ~${videoConfig.duration}s`);
+    logger.dryRun(
+      `Video type: ${videoConfig.type}, duration: ${videoConfig.duration === undefined ? 'unrestricted' : `~${videoConfig.duration}s`}`
+    );
     logger.dryRun(`Would write: ${scenarioPath}`);
     logger.dryRun(`Would write: ${scriptPath}`);
     logger.dryRun(`Would write: ${srtPath}`);
@@ -74,7 +80,20 @@ export async function runScenarioGenerate(options: ScenarioGenerateOptions): Pro
 
   const llm = createLlmProviderForTask(config.llm, 'scenario');
   const generator = new ScenarioGenerator(llm);
-  const { scenario, script } = await generator.generate(summary, videoConfig, config.target.url);
+  const generateEmotion = resolveVoiceProfiles(config.voice, config.voicevox).some((profile) => {
+    switch (profile.type) {
+      case 'voicevox':
+        return false;
+      case 'aitalk':
+        return profile.options.style === undefined;
+    }
+  });
+  const { scenario, script } = await generator.generate(
+    summary,
+    videoConfig,
+    config.target.url,
+    generateEmotion
+  );
 
   await writeYaml(scenarioPath, scenario);
   logger.success(`Saved: ${scenarioPath}`);

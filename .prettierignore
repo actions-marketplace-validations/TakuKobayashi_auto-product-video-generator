@@ -6,3 +6,13 @@ output/
 pnpm-lock.yaml
 *.tsbuildinfo
 *.log
+
+# Unity-generated caches and machine-local project state. These directories can
+# contain thousands of package files, broken cache links, and JSON owned by the
+# Editor rather than by APVG.
+packages/recorder/unity/Library/
+packages/recorder/unity/Logs/
+packages/recorder/unity/Temp/
+packages/recorder/unity/UserSettings/
+packages/recorder/unity/ProjectSettings/
+packages/recorder/unity/Packages/packages-lock.json

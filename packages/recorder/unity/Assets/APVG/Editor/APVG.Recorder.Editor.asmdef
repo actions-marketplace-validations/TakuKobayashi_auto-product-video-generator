@@ -1,0 +1,10 @@
+{
+  "name": "APVG.Recorder.Editor",
+  "references": [
+    "Unity.Recorder.Editor"
+  ],
+  "includePlatforms": [
+    "Editor"
+  ],
+  "autoReferenced": true
+}

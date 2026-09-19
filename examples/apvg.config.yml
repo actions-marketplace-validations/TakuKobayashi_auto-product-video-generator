@@ -93,10 +93,15 @@ target:
 
 video:
   type: 'demo' # teaser | shorts | demo | tutorial
-  duration: 90 # target seconds
+  # duration: 90 # optional target seconds; omit for unrestricted length
   resolution: '1920x1080'
   fps: 30
   language: 'ja'
+  screenshots: true # save one PNG of the final displayed frame for each scene
+  subtitles: true # false to render without subtitles
+  # Additional narration/character direction. Multi-line YAML is supported.
+  # scenarioPrompt: |
+  #   ずんだもんらしい親しみやすい口調にして、語尾には自然に「なのだ」を付けてください。
   singleLineSubtitles: true # split narration into short sequential one-line cues
   pageReadyWaitSeconds: 2 # extra wait after the first web page is fully loaded
   sceneGapSeconds: 1 # silence between narration clips/scenes, in seconds
@@ -132,9 +137,41 @@ llm:
   #       provider: "gemini"
   #       model: "gemini-2.5-pro"
 
-voicevox:
-  host: 'http://localhost:50021'
-  speakerId: 3
+voice:
+  # ${ANY_ENV_KEY} works in every string in this file. .env is loaded automatically.
+  # envFile: './.env.local' # optional additional dotenv file
+  profiles:
+    - name: voicevox-narrator
+      type: voicevox
+      url: 'http://localhost:50021'
+      speakerId: 3
+    # - name: aitalk-narrator
+    #   type: aitalk
+    #   url: 'https://webapi.aitalk.jp/webapi/v5/ttsget.php'
+    #   speakerName: nozomi
+    #   username: ${AITALK_USERNAME}
+    #   password: ${AITALK_PASSWORD}
+    #   AITalk ttsget options:
+    #   https://www.ai-j.jp/manual/business/webapi/5/modules/Api/TTSGet.html
+    #   options:
+    #     use_udic: true
+    #     ext: wav
+    #     fs: auto
+    #     bit: 16
+    #     channels: 1
+    #     mvolume: 1.0
+    #     volume: 1.0
+    #     speed: 1.0
+    #     pitch: 1.0
+    #     range: 1.0
+    #     style:
+    #       j: 0.5 # joy
+    #       s: 0.15 # sadness
+    #       a: 0.35 # anger
+    #     spause: 150
+    #     lpause: 370
+    #     epause: 800
+    #     tpause: 0
 
 output:
   dir: './output'

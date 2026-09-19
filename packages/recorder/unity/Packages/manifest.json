@@ -1,0 +1,8 @@
+{
+  "dependencies": {
+    "com.unity.recorder": "5.1.4",
+    "com.unity.test-framework": "1.6.0",
+    "com.unity.timeline": "1.8.10",
+    "com.unity.ugui": "2.0.0"
+  }
+}

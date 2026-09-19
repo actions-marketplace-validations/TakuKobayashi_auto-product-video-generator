@@ -18,16 +18,20 @@ export async function placeProjectEnvironmentFile(
   if (!existsSync(sourcePath)) throw new Error(`Environment file not found: ${sourcePath}`);
 
   const kind = detectProjectEnvironmentKind(projectRoot);
-  const destinationName = kind === 'android' ? 'local.properties' : kind === 'cloudflare' ? '.dev.vars' : '.env';
-  const androidRoot = existsSync(join(projectRoot, 'android')) ? join(projectRoot, 'android') : projectRoot;
+  const destinationName =
+    kind === 'android' ? 'local.properties' : kind === 'cloudflare' ? '.dev.vars' : '.env';
+  const androidRoot = existsSync(join(projectRoot, 'android'))
+    ? join(projectRoot, 'android')
+    : projectRoot;
   const destinationPath = join(kind === 'android' ? androidRoot : projectRoot, destinationName);
   const contents = await readFile(sourcePath, 'utf8');
 
   // Preserve the file byte-for-byte when it already uses the target convention.
   // This also retains advanced dotenv syntax that does not need conversion.
-  const output = basename(sourcePath) === destinationName
-    ? contents
-    : serializeEnvironment(parseEnvironment(contents), kind);
+  const output =
+    basename(sourcePath) === destinationName
+      ? contents
+      : serializeEnvironment(parseEnvironment(contents), kind);
   await writeFile(destinationPath, output, { encoding: 'utf8', mode: 0o600 });
   await chmod(destinationPath, 0o600);
   return { kind, path: destinationPath };
@@ -38,14 +42,17 @@ export function detectProjectEnvironmentKind(projectRoot: string): ProjectEnviro
     ['wrangler.toml', 'wrangler.json', 'wrangler.jsonc'].some((name) =>
       existsSync(join(projectRoot, name))
     )
-  ) return 'cloudflare';
+  )
+    return 'cloudflare';
 
   if (
     ['settings.gradle', 'settings.gradle.kts', 'build.gradle', 'build.gradle.kts'].some((name) =>
       existsSync(join(projectRoot, name))
-    ) || existsSync(join(projectRoot, 'app', 'src', 'main', 'AndroidManifest.xml')) ||
+    ) ||
+    existsSync(join(projectRoot, 'app', 'src', 'main', 'AndroidManifest.xml')) ||
     existsSync(join(projectRoot, 'android', 'app', 'src', 'main', 'AndroidManifest.xml'))
-  ) return 'android';
+  )
+    return 'android';
 
   return 'dotenv';
 }
@@ -80,17 +87,26 @@ function decodeValue(value: string): string {
   if (value.length >= 2 && value[0] === value[value.length - 1] && /['"]/.test(value[0])) {
     const inner = value.slice(1, -1);
     return value[0] === '"'
-      ? inner.replace(/\\n/g, '\n').replace(/\\r/g, '\r').replace(/\\"/g, '"').replace(/\\\\/g, '\\')
+      ? inner
+          .replace(/\\n/g, '\n')
+          .replace(/\\r/g, '\r')
+          .replace(/\\"/g, '"')
+          .replace(/\\\\/g, '\\')
       : inner;
   }
   return value;
 }
 
-function serializeEnvironment(values: Array<[string, string]>, kind: ProjectEnvironmentKind): string {
-  return `${values.map(([key, value]) => {
-    if (kind === 'android') return `${escapePropertyKey(key)}=${escapePropertyValue(value)}`;
-    return `${key}=${encodeDotenvValue(value)}`;
-  }).join('\n')}\n`;
+function serializeEnvironment(
+  values: Array<[string, string]>,
+  kind: ProjectEnvironmentKind
+): string {
+  return `${values
+    .map(([key, value]) => {
+      if (kind === 'android') return `${escapePropertyKey(key)}=${escapePropertyValue(value)}`;
+      return `${key}=${encodeDotenvValue(value)}`;
+    })
+    .join('\n')}\n`;
 }
 
 function encodeDotenvValue(value: string): string {
@@ -108,5 +124,7 @@ function escapePropertyValue(value: string): string {
 }
 
 function escapePropertyKey(value: string): string {
-  return escapePropertyValue(value).replace(/([:=#!])/g, '\\$1').replace(/ /g, '\\ ');
+  return escapePropertyValue(value)
+    .replace(/([:=#!])/g, '\\$1')
+    .replace(/ /g, '\\ ');
 }

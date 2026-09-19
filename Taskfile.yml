@@ -29,6 +29,13 @@ version: '3'
 dotenv: ['.env']
 
 vars:
+  # Taskfile does not require pnpm. npm is available with Node.js and is the
+  # default; pass PACKAGE_MANAGER=pnpm to keep using pnpm when preferred.
+  PACKAGE_MANAGER: '{{.PACKAGE_MANAGER | default "npm"}}'
+  NODE_EXEC: >-
+    {{if eq .PACKAGE_MANAGER "pnpm"}}pnpm exec{{else}}npx --no-install{{end}}
+  CLI_RUNNER: >-
+    {{if eq .PACKAGE_MANAGER "pnpm"}}pnpm apvg{{else}}npm run apvg --{{end}}
   PROFILE: '{{.PROFILE | default "local"}}'
   WITH_OLLAMA: '{{.WITH_OLLAMA | default "true"}}'
   VOICEVOX_IMAGE: '{{.VOICEVOX_IMAGE | default "voicevox/voicevox_engine:cpu-latest"}}'
@@ -68,7 +75,7 @@ tasks:
   install:node:
     desc: 'Node依存関係をインストールします (ffmpeg-static/ffprobe-staticも自動ダウンロード)'
     cmds:
-      - pnpm install
+      - '{{.PACKAGE_MANAGER}} install'
 
   install:playwright:
     desc: 'Playwright の Chromium ブラウザをインストールします'
@@ -189,7 +196,7 @@ tasks:
     dir: '{{.ROOT_DIR}}'
     cmds:
       - >-
-        pnpm exec tsx
+        {{.NODE_EXEC}} tsx
         --tsconfig tsconfig.base.json
         --conditions=development
         packages/cli/src/index.ts
@@ -200,7 +207,7 @@ tasks:
     dir: '{{.ROOT_DIR}}'
     cmds:
       - >-
-        pnpm exec tsc -b
+        {{.NODE_EXEC}} tsc -b
         packages/core/tsconfig.json
         packages/source/tsconfig.json
         packages/ai/tsconfig.json
@@ -209,20 +216,20 @@ tasks:
         packages/voicevox/tsconfig.json
         packages/renderer/tsconfig.json
         packages/cli/tsconfig.json
-      - node packages/cli/build.mjs
+      - '{{.NODE_EXEC}} tsx packages/cli/build.ts'
 
   build:cli:
     desc: '公開用 CLI パッケージをビルドします'
     dir: '{{.ROOT_DIR}}'
     cmds:
-      - pnpm exec tsc -b packages/cli/tsconfig.json
-      - node packages/cli/build.mjs
+      - '{{.NODE_EXEC}} tsc -b packages/cli/tsconfig.json'
+      - '{{.NODE_EXEC}} tsx packages/cli/build.ts'
 
   build:watch:
     desc: '全パッケージを監視して TypeScript を再ビルドします'
     dir: '{{.ROOT_DIR}}'
     cmds:
-      - pnpm exec tsc -b --watch packages/*/tsconfig.json
+      - '{{.NODE_EXEC}} tsc -b --watch packages/*/tsconfig.json'
 
   clean:
     desc: '全パッケージの dist/ と TypeScript ビルド情報を削除します'
@@ -260,19 +267,27 @@ tasks:
     desc: 'テスト、ビルド、npm package の内容を検証します'
     dir: '{{.ROOT_DIR}}'
     cmds:
-      - pnpm test
+      - '{{.PACKAGE_MANAGER}} test'
       - task: build
-      - pnpm --filter auto-product-video-generator pack --dry-run
+      - >-
+        {{if eq .PACKAGE_MANAGER "pnpm"}}
+        pnpm --filter auto-product-video-generator pack --dry-run
+        {{else}}
+        npm pack --workspace auto-product-video-generator --dry-run
+        {{end}}
 
   publish:npm:
     desc: 'テストとビルドの成功後に CLI package を npm へ公開します'
     dir: '{{.ROOT_DIR}}'
     cmds:
-      - pnpm test
+      - '{{.PACKAGE_MANAGER}} test'
       - task: build
       - >-
-        pnpm --filter auto-product-video-generator publish
-        --access public
+        {{if eq .PACKAGE_MANAGER "pnpm"}}
+        pnpm --filter auto-product-video-generator publish --access public
+        {{else}}
+        npm publish --workspace auto-product-video-generator --access public
+        {{end}}
 
   # ── Quickstart ─────────────────────────────────────────────────────────
 
@@ -283,5 +298,5 @@ tasks:
       - task: serve
       - 'echo ""'
       - 'echo "セットアップ完了。次のコマンドで動画生成を始められます:"'
-      - 'echo "  pnpm apvg project init --repo <git-url> --url http://localhost:3000"'
-      - 'echo "  pnpm apvg video generate"'
+      - 'echo "  {{.CLI_RUNNER}} project init --repo <git-url> --url http://localhost:3000"'
+      - 'echo "  {{.CLI_RUNNER}} video generate"'

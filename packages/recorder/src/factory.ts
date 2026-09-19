@@ -1,7 +1,13 @@
-import type { ApvgConfig, ProjectPlatform, SetupStep } from '@auto-product-video-generator/core';
+import {
+  UnityConfigSchema,
+  type ApvgConfig,
+  type ProjectPlatform,
+  type SetupStep,
+} from '@auto-product-video-generator/core';
 import { SceneRecorder } from '@auto-product-video-generator/playwright';
 import { AndroidRecorder } from './android-recorder.js';
 import { CliRecorder } from './cli-recorder.js';
+import { UnityRecorder } from './unity-recorder.js';
 import type { PlatformRecorder } from './types.js';
 
 export interface RecorderFactoryOptions {
@@ -17,7 +23,6 @@ export function isAndroidRecordingPlatform(platform: ProjectPlatform): boolean {
     case 'android':
     case 'flutter':
     case 'react-native':
-    case 'unity':
       return true;
     default:
       return false;
@@ -42,12 +47,13 @@ export function createPlatformRecorder(
     case 'android':
     case 'flutter':
     case 'react-native':
-    case 'unity':
       return new AndroidRecorder(config.target.android || {}, options);
+    case 'unity':
+      return new UnityRecorder(UnityConfigSchema.parse(config.target.unity || {}), options);
     default:
       throw new Error(
         `Recording platform '${platform}' is not implemented yet. ` +
-          'Currently supported: web, CLI, Android, and Flutter/React Native/Unity builds targeting Android.'
+          'Currently supported: web, CLI, Android, Flutter/React Native, and Unity Recorder.'
       );
   }
 }

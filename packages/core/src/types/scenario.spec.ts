@@ -1,5 +1,19 @@
 import { describe, expect, it } from 'vitest';
-import { ActionSchema } from './scenario.js';
+import { ActionSchema, SceneSchema } from './scenario.js';
+
+describe('narration emotion', () => {
+  it('accepts a valid AI Talk style and rejects a total over 1', () => {
+    const scene = { id: 'intro', title: 'Intro', narration: 'Hello', actions: [] };
+    expect(SceneSchema.parse({ ...scene, emotion: { j: 0.7, s: 0.1, a: 0.2 } }).emotion).toEqual({
+      j: 0.7,
+      s: 0.1,
+      a: 0.2,
+    });
+    expect(() => SceneSchema.parse({ ...scene, emotion: { j: 0.7, s: 0.3, a: 0.2 } })).toThrow(
+      /total 1.0 or less/
+    );
+  });
+});
 
 describe('device actions', () => {
   it('accepts Android actions used by generated scenarios', () => {

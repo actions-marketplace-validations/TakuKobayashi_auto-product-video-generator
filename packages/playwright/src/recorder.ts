@@ -58,12 +58,14 @@ export class SceneRecorder {
       return outputPath;
     }
 
-    if (!existsSync(options.outputDir)) {
-      await mkdir(options.outputDir, { recursive: true });
-    }
-    if (!existsSync(options.screenshotDir)) {
-      await mkdir(options.screenshotDir, { recursive: true });
-    }
+    await Promise.all([
+      !existsSync(options.outputDir)
+        ? mkdir(options.outputDir, { recursive: true })
+        : Promise.resolve(),
+      !existsSync(options.screenshotDir)
+        ? mkdir(options.screenshotDir, { recursive: true })
+        : Promise.resolve(),
+    ]);
 
     const browser = await chromium.launch({
       headless: !options.headed,

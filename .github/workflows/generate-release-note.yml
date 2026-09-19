@@ -1,0 +1,42 @@
+name: Generate release note
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to generate or regenerate notes for
+        required: true
+        type: string
+      model:
+        description: Ollama model used to generate the release notes
+        required: false
+        default: qwen2.5-coder:7b-instruct
+        type: string
+      dry-run:
+        description: Generate and print the notes without creating or updating the GitHub Release
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Generate release note for ${{ inputs.tag }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository with release history
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+
+      - name: Create or update AI-generated release notes
+        uses: TakuKobayashi/auto-generate-release-note@v2
+        with:
+          tag: ${{ inputs.tag }}
+          model: ${{ inputs.model }}
+          language: ja
+          bilingual: 'true'
+          dry-run: ${{ inputs.dry-run }}

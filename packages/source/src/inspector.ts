@@ -60,6 +60,23 @@ export interface ProjectSourceContext {
   cliCommands?: string[];
   /** Discovered command paths that explicitly declare a --dry-run option. */
   cliDryRunCommands?: string[];
+  /** Scene-first Unity evidence. Present only for a Unity project. */
+  unity?: UnitySourceContext;
+}
+
+export interface UnitySceneContext {
+  path: string;
+  objectNames: string[];
+  referencedAssets: string[];
+  referencedScripts: string[];
+}
+
+export interface UnitySourceContext {
+  editorVersion?: string;
+  sceneSource?: 'configured' | 'build-settings' | 'discovered';
+  enabledScenes: UnitySceneContext[];
+  projectScripts: Array<{ path: string; excerpt: string }>;
+  packages: string[];
 }
 
 const EXCLUDED_DIRS = new Set([
@@ -158,7 +175,8 @@ const PROMOTIONAL_ASSET_EXTENSIONS = new Set([
 
 export async function inspectProject(
   rootDir: string,
-  configuredExcludes: string[] = []
+  configuredExcludes: string[] = [],
+  configuredUnityScenes?: string[]
 ): Promise<ProjectSourceContext> {
   logger.step('source', `Inspecting project at ${rootDir}...`);
 
@@ -221,6 +239,9 @@ export async function inspectProject(
   const fileTree = routes.length === 0 ? fileIndex.sourceFiles : [];
   const assetFiles = fileIndex.assetFiles;
   const platformHints = await detectPlatformHints(rootDir, packageJson, deps);
+  const unity = platformHints.some((hint) => hint.includes('(Unity)'))
+    ? await inspectUnityProject(rootDir, configuredUnityScenes)
+    : undefined;
   const cliSourceExcerpt = packageJson?.bin
     ? await readCliSourceExcerpt(rootDir, fileIndex.sourceFiles)
     : undefined;
@@ -252,7 +273,200 @@ export async function inspectProject(
     cliSourceExcerpt,
     cliCommands: cliCommandCatalog?.commands,
     cliDryRunCommands: cliCommandCatalog?.dryRunCommands,
+    unity,
   };
+}
+
+async function inspectUnityProject(
+  rootDir: string,
+  configuredScenePaths?: string[]
+): Promise<UnitySourceContext> {
+  const settingsPath = join(rootDir, 'ProjectSettings', 'EditorBuildSettings.asset');
+  const settings = await readTextIfPresent(settingsPath);
+  let scenePaths = configuredScenePaths?.length
+    ? validateConfiguredUnityScenePaths(rootDir, configuredScenePaths)
+    : [...settings.matchAll(/- enabled:\s*1\s*[\s\S]*?path:\s*([^\r\n]+)/g)]
+        .map((match) => match[1].trim())
+        .filter((path) => path.startsWith('Assets/'));
+
+  const guidPaths = new Map<string, string>();
+  await walkUnityMetaFiles(join(rootDir, 'Assets'), rootDir, guidPaths);
+  const sceneSource = configuredScenePaths?.length
+    ? 'configured'
+    : scenePaths.length > 0
+      ? 'build-settings'
+      : 'discovered';
+  if (sceneSource === 'discovered') {
+    scenePaths = discoverUnityScenePaths([...guidPaths.values()]);
+  }
+  const enabledScenes: UnitySceneContext[] = [];
+  const referencedScriptPaths = new Set<string>();
+
+  for (const path of scenePaths.slice(0, 40)) {
+    const content = await readTextIfPresent(join(rootDir, ...path.split('/')));
+    const objectNames = uniqueMatches(content, /^[ \t]*m_Name:[ \t]*(.+)$/gm, 40);
+    const referencedAssets = (await resolveUnityReferenceClosure(rootDir, content, guidPaths))
+      .map((guid) => guidPaths.get(guid))
+      .filter((value): value is string => Boolean(value));
+    const referencedScripts = referencedAssets.filter(
+      (asset) => asset.endsWith('.cs') && !isLikelyThirdPartyUnityAsset(asset)
+    );
+    referencedScripts.forEach((script) => referencedScriptPaths.add(script));
+    enabledScenes.push({
+      path,
+      objectNames,
+      referencedAssets: referencedAssets.slice(0, 80),
+      referencedScripts,
+    });
+  }
+
+  // Include scene-referenced scripts first. Add a small selection of other
+  // first-party-looking scripts so bootstrap/game-state logic is not missed.
+  const scriptCandidates = [...guidPaths.values()].filter(
+    (path) => path.endsWith('.cs') && !isLikelyThirdPartyUnityAsset(path)
+  );
+  const orderedScripts = [
+    ...referencedScriptPaths,
+    ...scriptCandidates.filter((path) => !referencedScriptPaths.has(path)),
+  ].slice(0, 30);
+  const projectScripts = await Promise.all(
+    orderedScripts.map(async (path) => ({
+      path,
+      excerpt: (await readTextIfPresent(join(rootDir, ...path.split('/')))).slice(0, 3000),
+    }))
+  );
+  const manifest = await readTextIfPresent(join(rootDir, 'Packages', 'manifest.json'));
+  let packages: string[] = [];
+  try {
+    packages = Object.keys((JSON.parse(manifest).dependencies || {}) as Record<string, string>);
+  } catch {
+    // An invalid/missing manifest should not prevent the remaining source analysis.
+  }
+  const version = await readTextIfPresent(join(rootDir, 'ProjectSettings', 'ProjectVersion.txt'));
+  return {
+    editorVersion: version.match(/^m_EditorVersion:\s*(\S+)/m)?.[1],
+    sceneSource,
+    enabledScenes,
+    projectScripts,
+    packages,
+  };
+}
+
+function validateConfiguredUnityScenePaths(rootDir: string, paths: string[]): string[] {
+  return paths.map((path) => {
+    const normalized = path.trim().replace(/\\/g, '/');
+    const segments = normalized.split('/');
+    if (
+      !normalized.startsWith('Assets/') ||
+      !normalized.endsWith('.unity') ||
+      segments.some((segment) => segment === '.' || segment === '..') ||
+      !existsSync(join(rootDir, ...segments))
+    ) {
+      throw new Error(`Configured Unity scene does not exist under Assets: ${path}`);
+    }
+    return normalized;
+  });
+}
+
+function discoverUnityScenePaths(assetPaths: string[]): string[] {
+  return assetPaths
+    .filter((path) => path.endsWith('.unity') && !isExcludedUnityScene(path))
+    .sort((left, right) => unitySceneScore(right) - unitySceneScore(left) || left.localeCompare(right))
+    .slice(0, 40);
+}
+
+function isExcludedUnityScene(path: string): boolean {
+  if (isLikelyThirdPartyUnityAsset(path)) return true;
+  const segments = path.toLowerCase().split('/');
+  const filename = segments.at(-1)?.replace(/\.unity$/, '') || '';
+  return (
+    segments.some((segment) =>
+      /^(?:editor|tests?|samples?|examples?|tutorials?|demos?)$/.test(segment)
+    ) || /(?:^|[-_. ])(?:test|sample|example|tutorial)(?:$|[-_. ])/i.test(filename)
+  );
+}
+
+function unitySceneScore(path: string): number {
+  const segments = path.toLowerCase().split('/');
+  const filename = segments.at(-1)?.replace(/\.unity$/, '') || '';
+  let score = 0;
+  if (segments.includes('scenes')) score += 100;
+  else if (segments.includes('scene')) score += 90;
+  if (/^(?:main|title|menu|game|start|bootstrap|intro)$/.test(filename)) score += 50;
+  score -= segments.length;
+  return score;
+}
+
+async function walkUnityMetaFiles(
+  dir: string,
+  rootDir: string,
+  result: Map<string, string>
+): Promise<void> {
+  let entries;
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (result.size >= 20000) return;
+    const absolute = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (EXCLUDED_DIRS.has(entry.name)) continue;
+      await walkUnityMetaFiles(absolute, rootDir, result);
+    } else if (entry.name.endsWith('.meta')) {
+      const meta = await readTextIfPresent(absolute);
+      const guid = meta.match(/^guid:\s*([0-9a-f]{32})/m)?.[1];
+      if (guid) {
+        result.set(
+          guid,
+          relative(rootDir, absolute.slice(0, -'.meta'.length)).split(sep).join('/')
+        );
+      }
+    }
+  }
+}
+
+function uniqueMatches(source: string, pattern: RegExp, limit: number): string[] {
+  return [...new Set([...source.matchAll(pattern)].map((match) => match[1].trim()))].slice(
+    0,
+    limit
+  );
+}
+
+function isLikelyThirdPartyUnityAsset(path: string): boolean {
+  return /(?:^|\/)(?:Plugins|ThirdParty|AssetStoreTools|IsoTools|AudioManager_KanKikuchi|APVGGenerated[^/]*)(?:\/|$)/i.test(
+    path
+  );
+}
+
+async function resolveUnityReferenceClosure(
+  rootDir: string,
+  initialContent: string,
+  guidPaths: Map<string, string>
+): Promise<string[]> {
+  const discovered = new Set(uniqueMatches(initialContent, /guid:[ \t]*([0-9a-f]{32})/g, 500));
+  const pending = [...discovered];
+  while (pending.length > 0 && discovered.size < 500) {
+    const guid = pending.shift()!;
+    const path = guidPaths.get(guid);
+    if (!path || !/\.(?:prefab|asset)$/i.test(path)) continue;
+    const content = await readTextIfPresent(join(rootDir, ...path.split('/')));
+    for (const nested of uniqueMatches(content, /guid:[ \t]*([0-9a-f]{32})/g, 250)) {
+      if (discovered.has(nested)) continue;
+      discovered.add(nested);
+      pending.push(nested);
+    }
+  }
+  return [...discovered];
+}
+
+async function readTextIfPresent(path: string): Promise<string> {
+  try {
+    return await readFile(path, 'utf8');
+  } catch {
+    return '';
+  }
 }
 
 async function discoverCliCommandPaths(

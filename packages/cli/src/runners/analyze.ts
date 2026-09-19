@@ -1,10 +1,10 @@
 import { join } from 'node:path';
 import {
   loadConfig,
-  saveConfig,
   writeJson,
   logger,
   describeTaskLlm,
+  UnityConfigSchema,
 } from '@auto-product-video-generator/core';
 import { createLlmProviderForTask, ProjectAnalyzer } from '@auto-product-video-generator/ai';
 import {
@@ -13,6 +13,7 @@ import {
   detectStartCommand,
 } from '@auto-product-video-generator/source';
 import { applyInferredTargetUrl } from '../utils/inferred-target.js';
+import { saveResolvedConfig } from '../utils/resolved-config.js';
 
 interface AnalyzeOptions {
   config?: string;
@@ -54,7 +55,11 @@ export async function runAnalyze(options: AnalyzeOptions): Promise<void> {
   // Deterministic: resolve (clone or verify local) + inspect the actual source.
   logger.step('source', 'Resolving project source (this may take a moment for a fresh clone)...');
   const rootDir = await resolveProjectSource({ source: config.source, cloneDir });
-  const sourceContext = await inspectProject(rootDir, config.source.exclude);
+  const sourceContext = await inspectProject(
+    rootDir,
+    config.source.exclude,
+    config.target.unity?.scenes
+  );
 
   await writeJson(contextPath, sourceContext);
   logger.success(`Saved: ${contextPath}`);
@@ -74,13 +79,8 @@ export async function runAnalyze(options: AnalyzeOptions): Promise<void> {
     const detected = detectStartCommand(sourceContext.packageJson, sourceContext.packageManager);
     if (detected) {
       config.source.startCommand = detected;
-      await saveConfig(configPath, config);
-      logger.info(
-        `Detected dev server command '${detected}' — saved to ${configPath} (source.startCommand).`
-      );
-      logger.dim(
-        `  Edit apvg.config.yml if this isn't right, or clear it to start the app yourself.`
-      );
+      logger.info(`Detected dev server command '${detected}' (stored in resolved analysis state).`);
+      logger.dim(`  Set source.startCommand in apvg.config.yml to override this detection.`);
     }
   }
 
@@ -89,31 +89,42 @@ export async function runAnalyze(options: AnalyzeOptions): Promise<void> {
   const analyzer = new ProjectAnalyzer(llm);
   const summary = await analyzer.analyze(sourceContext, targetUrl);
 
-  if (applyInferredTargetUrl(config, summary)) await saveConfig(configPath, config);
+  applyInferredTargetUrl(config, summary);
 
   switch (summary.platform) {
     case 'android':
     case 'flutter':
     case 'react-native':
-    case 'unity':
       // Build/install/emulator setup is deterministic in AndroidRecorder; do
       // not retain an LLM-guessed setup plan that would duplicate those steps.
       summary.setupSteps = [];
       config.target.type = 'android';
       config.target.android ||= { autoStartEmulator: true, autoInstall: true };
-      await saveConfig(configPath, config);
-      logger.info(`Enabled automatic Android build/emulator preparation in ${configPath}.`);
+      logger.info(`Enabled automatic Android build/emulator preparation.`);
+      break;
+    case 'unity':
+      summary.setupSteps = [];
+      config.target.type = 'unity';
+      config.target.unity = UnityConfigSchema.parse(config.target.unity || {});
+      if (
+        sourceContext.unity?.sceneSource === 'discovered' &&
+        !config.target.unity.scenes?.length
+      ) {
+        config.target.unity.scenes = sourceContext.unity.enabledScenes.map((scene) => scene.path);
+      }
+      logger.info(`Enabled Unity Recorder scene capture (${sourceContext.unity?.sceneSource}).`);
       break;
     case 'cli':
       config.target.type = 'cli';
-      await saveConfig(configPath, config);
-      logger.info(`Enabled Docker-based CLI recording in ${configPath}.`);
+      logger.info(`Enabled Docker-based CLI recording.`);
       break;
   }
 
   await writeJson(summaryPath, summary);
+  const resolvedPath = await saveResolvedConfig(config, summary.platform);
 
   logger.success(`Saved: ${summaryPath}`);
+  logger.success(`Saved: ${resolvedPath}`);
   logger.info('');
   logger.info(`Platform: ${summary.platform}`);
   logger.info(`Found ${summary.features.length} features:`);

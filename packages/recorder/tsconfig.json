@@ -3,5 +3,5 @@
   "compilerOptions": { "outDir": "./dist", "rootDir": "./src" },
   "include": ["src"],
   "exclude": ["src/**/*.spec.ts", "src/**/_test-*.ts"],
-  "references": [{ "path": "../core" }, { "path": "../playwright" }]
+  "references": [{ "path": "../core" }, { "path": "../playwright" }, { "path": "../renderer" }]
 }

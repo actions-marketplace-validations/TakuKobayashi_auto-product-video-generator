@@ -26,6 +26,18 @@ export async function selectProjectRoot(
     return selected;
   }
 
+  // A Unity repository commonly contains auxiliary Node.js services without
+  // having a package.json at its own root. ProjectVersion.txt is authoritative:
+  // do not let a nested server/tool replace the Unity project being requested.
+  if (isUnityProjectRoot(repositoryRoot)) {
+    logger.success(`Selected Unity project root: ${repositoryRoot}`);
+    return repositoryRoot;
+  }
+  if (isAndroidProjectRoot(repositoryRoot)) {
+    logger.success(`Selected Android project root: ${repositoryRoot}`);
+    return repositoryRoot;
+  }
+
   const excludePatterns = await loadSourceExcludePatterns(repositoryRoot, source.exclude);
   const candidates = await discoverCandidates(repositoryRoot, excludePatterns);
   const applications = candidates.filter((item) => item.platform !== 'web' || item.runnable);
@@ -138,6 +150,23 @@ function detectCandidatePlatform(
   )
     return 'cli';
   return 'other';
+}
+
+function isUnityProjectRoot(dir: string): boolean {
+  return (
+    existsSync(resolve(dir, 'ProjectSettings', 'ProjectVersion.txt')) &&
+    existsSync(resolve(dir, 'Assets')) &&
+    existsSync(resolve(dir, 'Packages'))
+  );
+}
+
+function isAndroidProjectRoot(dir: string): boolean {
+  return (
+    existsSync(resolve(dir, 'gradlew')) &&
+    (existsSync(resolve(dir, 'settings.gradle')) ||
+      existsSync(resolve(dir, 'settings.gradle.kts'))) &&
+    existsSync(resolve(dir, 'app', 'src', 'main', 'AndroidManifest.xml'))
+  );
 }
 
 function resolveInside(root: string, projectPath: string): string {

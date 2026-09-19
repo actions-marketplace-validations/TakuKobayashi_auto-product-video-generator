@@ -31,6 +31,7 @@ export function buildScriptFromScenario(scenario: Scenario, sceneGapSeconds = 1)
     return {
       id: scene.id,
       narration: scene.narration,
+      emotion: scene.emotion,
       startTime,
       endTime,
       voiceFile: `voice/scene-${scene.id}.wav`,

@@ -8,6 +8,7 @@ export function scenarioCommand(): Command {
     .description('Generate scenario.yml and script.yml via AI')
     .option('-c, --config <path>', 'path to apvg.config.yml', 'apvg.config.yml')
     .option('-t, --type <type>', 'override video type: teaser|shorts|demo|tutorial')
+    .option('--prompt <text>', 'additional narration style or character direction')
     .option(
       '--project-summary <path>',
       'project summary JSON input (default: <workDir>/project-summary.json)'

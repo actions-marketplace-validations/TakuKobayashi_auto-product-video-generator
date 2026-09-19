@@ -1,3 +1,6 @@
+// The workspace package.json has no `type: module`, so keep this JavaScript
+// config in CommonJS format. This prevents Node from reparsing it as ESM every
+// time `pnpm run format` starts.
 /** @type {import('prettier').Config} */
 const config = {
   semi: true,
@@ -7,4 +10,4 @@ const config = {
   tabWidth: 2,
 };
 
-export default config;
+module.exports = config;

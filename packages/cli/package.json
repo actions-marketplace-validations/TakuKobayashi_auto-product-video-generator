@@ -27,7 +27,7 @@
   },
   "scripts": {
     "build": "task -t ../../Taskfile.yml build:cli",
-    "prepack": "node build.mjs",
+    "prepack": "tsx build.ts",
     "clean": "rm -rf dist"
   },
   "dependencies": {

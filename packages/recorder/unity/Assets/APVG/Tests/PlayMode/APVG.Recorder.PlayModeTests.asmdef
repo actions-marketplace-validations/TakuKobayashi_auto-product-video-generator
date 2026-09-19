@@ -1,0 +1,9 @@
+{
+  "name": "APVG.Recorder.PlayModeTests",
+  "references": [],
+  "optionalUnityReferences": [
+    "TestAssemblies"
+  ],
+  "includePlatforms": [],
+  "autoReferenced": false
+}

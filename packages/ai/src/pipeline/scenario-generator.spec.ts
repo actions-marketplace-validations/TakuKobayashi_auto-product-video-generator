@@ -5,10 +5,12 @@ import { ScenarioGenerator } from './scenario-generator.js';
 
 describe('ScenarioGenerator route grounding', () => {
   it('replaces a dynamic route template with the concrete base URL', async () => {
+    let receivedPrompt = '';
     const llm: LlmProvider = {
       generate: async () => '',
-      generateJson: async <T>() =>
-        ({
+      generateJson: async <T>(prompt) => {
+        receivedPrompt = prompt;
+        return {
           meta: { title: 'Demo', description: 'Demo', type: 'demo', duration: 30, language: 'ja' },
           scenes: [
             {
@@ -18,7 +20,8 @@ describe('ScenarioGenerator route grounding', () => {
               actions: [{ type: 'goto', url: 'http://127.0.0.1:3000/en/blog/[slug]' }],
             },
           ],
-        }) as T,
+        } as T;
+      },
     };
     const summary: ProjectSummary = {
       name: 'Example',
@@ -46,6 +49,7 @@ describe('ScenarioGenerator route grounding', () => {
       resolution: '1280x720',
       fps: 30,
       language: 'ja',
+      scenarioPrompt: '語尾に「なのだ」を付ける',
       singleLineSubtitles: true,
       pageReadyWaitSeconds: 2,
       sceneGapSeconds: 1,
@@ -62,6 +66,8 @@ describe('ScenarioGenerator route grounding', () => {
       url: 'http://127.0.0.1:3000/',
     });
     expect(JSON.stringify(scenario)).not.toContain('[slug]');
+    expect(receivedPrompt).toContain('語尾に「なのだ」を付ける');
+    expect(receivedPrompt).toContain('<creative-direction>');
   });
 });
 
@@ -128,5 +134,65 @@ describe('ScenarioGenerator CLI grounding', () => {
     expect(scenario.scenes[0].actions).toEqual([
       { type: 'run_command', command: 'example --help' },
     ]);
+  });
+});
+
+describe('ScenarioGenerator Unity grounding', () => {
+  it('asks for scene-ordered narration and retains only wait actions', async () => {
+    let receivedPrompt = '';
+    const llm = {
+      generate: async () => '',
+      generateJson: async <T>(prompt: string) => {
+        receivedPrompt = prompt;
+        return {
+          meta: { title: 'Game', description: 'Demo', type: 'demo', duration: 10, language: 'ja' },
+          scenes: [
+            {
+              id: 'title',
+              title: 'Title',
+              narration: 'ゲームを始めます。',
+              actions: [{ type: 'launch_app' }],
+            },
+          ],
+        } as T;
+      },
+    };
+    const summary = {
+      name: 'Game',
+      description: 'A game',
+      platform: 'unity',
+      setupSteps: [],
+      features: [
+        {
+          id: 'Assets/Scenes/Title.unity',
+          title: 'Title',
+          description: 'Start screen',
+          demoable: true,
+          priority: 'high',
+        },
+      ],
+      targetAudience: 'players',
+      keyValueProps: ['fun'],
+      suggestedVideoTypes: ['demo'],
+    } as const;
+    const config = {
+      type: 'demo',
+      language: 'ja',
+      resolution: '1920x1080',
+      fps: 30,
+      sceneGapSeconds: 0.5,
+    } as any;
+
+    const { scenario } = await new ScenarioGenerator(llm).generate(
+      summary as any,
+      config,
+      'http://localhost'
+    );
+
+    expect(receivedPrompt).toContain(
+      'Create exactly one scenario scene for each listed Unity Scene'
+    );
+    expect(receivedPrompt).toContain('Assets/Scenes/Title.unity');
+    expect(scenario.scenes[0].actions).toEqual([{ type: 'wait', ms: 1000 }]);
   });
 });

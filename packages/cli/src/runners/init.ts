@@ -26,6 +26,8 @@ interface InitOptions {
   androidApk?: string;
   androidBuildCommand?: string;
   androidSdk?: string;
+  unityEditor?: string;
+  unityScenes?: string;
   force?: boolean;
   dryRun?: boolean;
 }
@@ -103,6 +105,20 @@ export async function runInit(directory: string, options: InitOptions): Promise<
       autoInstall: true,
     };
   }
+  if (options.unityEditor || options.unityScenes) {
+    config.target.type = 'unity';
+    config.target.unity = {
+      editorPath: options.unityEditor,
+      scenes: options.unityScenes
+        ?.split(',')
+        .map((scene) => scene.trim())
+        .filter(Boolean),
+      sceneStartIndex: 0,
+      sceneLoadWaitSeconds: 2,
+      includeAudio: false,
+      timeoutSeconds: 900,
+    };
+  }
   config.video.type = (options.type as 'teaser' | 'shorts' | 'demo' | 'tutorial') || 'demo';
 
   if (options.dryRun) {
@@ -111,7 +127,19 @@ export async function runInit(directory: string, options: InitOptions): Promise<
     return;
   }
 
-  await saveConfig(configPath, config);
+  const hasExplicitTarget = Boolean(
+    options.url ||
+    options.androidPackage ||
+    options.androidActivity ||
+    options.androidSerial ||
+    options.androidAvd ||
+    options.androidApk ||
+    options.androidBuildCommand ||
+    options.androidSdk ||
+    options.unityEditor ||
+    options.unityScenes
+  );
+  await saveConfig(configPath, config, { omitAutoDetectedTarget: !hasExplicitTarget });
 
   logger.success(`Created: ${configPath}`);
   logger.info('');

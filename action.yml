@@ -51,6 +51,30 @@ inputs:
     description: Render a faster, lower-quality preview
     required: false
     default: 'false'
+  export-remotion:
+    description: Export an editable Remotion project and include it in the artifact output
+    required: false
+    default: 'true'
+  cache-enabled:
+    description: Cache Android SDK/emulator, Unity Editor, Unity Hub, Ollama models, and Playwright Chromium
+    required: false
+    default: 'true'
+  unity-email:
+    description: Unity ID email used to activate a Personal license when analysis detects Unity
+    required: false
+    default: ''
+  unity-password:
+    description: Unity ID password used to activate a Personal license when analysis detects Unity
+    required: false
+    default: ''
+  unity-hub-version:
+    description: Unity Hub version used to install the Unity Editor
+    required: false
+    default: '3.21.1'
+  unity-version:
+    description: Unity Editor version override; empty uses the project version, with versions before 2022.2 upgraded to the latest stable release
+    required: false
+    default: ''
 
 outputs:
   video-path:
@@ -59,6 +83,9 @@ outputs:
   artifacts-path:
     description: Absolute path containing the video and intermediate artifacts
     value: ${{ steps.result.outputs['artifacts-path'] }}
+  remotion-project-path:
+    description: Absolute path to the exported Remotion project; empty when export-remotion is false
+    value: ${{ steps.result.outputs['remotion-project-path'] }}
 
 runs:
   using: composite
@@ -69,12 +96,13 @@ runs:
         node-version: '22'
         package-manager-cache: false
 
-    - name: Validate inputs and prepare paths
+    - name: Validate inputs
       shell: bash
       env:
         VIDEO_TYPE: ${{ inputs['video-type'] }}
         VOICEVOX_SPEAKER: ${{ inputs['voicevox-speaker'] }}
-        OUTPUT_DIRECTORY: ${{ inputs['output-directory'] }}
+        EXPORT_REMOTION: ${{ inputs['export-remotion'] }}
+        CACHE_ENABLED: ${{ inputs['cache-enabled'] }}
       run: |
         set -Eeuo pipefail
         [[ "${RUNNER_OS:-Linux}" == "Linux" ]] || {
@@ -89,6 +117,20 @@ runs:
           echo "::error::voicevox-speaker must be a non-negative integer"
           exit 1
         }
+        [[ "$EXPORT_REMOTION" =~ ^(true|false)$ ]] || {
+          echo "::error::export-remotion must be true or false"
+          exit 1
+        }
+        [[ "$CACHE_ENABLED" =~ ^(true|false)$ ]] || {
+          echo "::error::cache-enabled must be true or false"
+          exit 1
+        }
+
+    - name: Prepare paths
+      shell: bash
+      env:
+        OUTPUT_DIRECTORY: ${{ inputs['output-directory'] }}
+      run: |
         run_dir="$RUNNER_TEMP/apvg-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}"
         if [[ "$OUTPUT_DIRECTORY" = /* ]]; then
           output_dir="$OUTPUT_DIRECTORY"
@@ -99,6 +141,11 @@ runs:
         echo "APVG_RUN_DIR=$run_dir" >> "$GITHUB_ENV"
         echo "APVG_OUTPUT_DIR=$output_dir" >> "$GITHUB_ENV"
         echo "APVG_CONFIG=$run_dir/apvg.config.yml" >> "$GITHUB_ENV"
+        echo "APVG_WORK_DIR=$run_dir/work" >> "$GITHUB_ENV"
+        echo "OLLAMA_HOST=http://127.0.0.1:11434" >> "$GITHUB_ENV"
+        echo "VOICEVOX_CONTAINER=apvg-voicevox-action" >> "$GITHUB_ENV"
+        echo "VOICEVOX_HOST=http://127.0.0.1:50021" >> "$GITHUB_ENV"
+        echo "VOICEVOX_PORT=50021" >> "$GITHUB_ENV"
 
     - name: Install APVG from npm
       shell: bash
@@ -107,28 +154,23 @@ runs:
       run: |
         npm install --global "auto-product-video-generator@$APVG_VERSION"
         echo "APVG_PACKAGE_ROOT=$(npm root --global)/auto-product-video-generator" >> "$GITHUB_ENV"
-        apvg --version
+
+    - name: Get Playwright version
+      if: inputs['cache-enabled'] == 'true'
+      id: playwright
+      shell: bash
+      run: echo "version=$(npm exec --prefix "$APVG_PACKAGE_ROOT" -- playwright --version | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+
+    - name: Cache Playwright Chromium
+      if: inputs['cache-enabled'] == 'true'
+      uses: actions/cache@v6
+      with:
+        path: ~/.cache/ms-playwright
+        key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ steps.playwright.outputs.version }}
 
     - name: Install Playwright Chromium
       shell: bash
-      run: |
-        playwright_cli=$(node --input-type=module -e '
-          import { createRequire } from "node:module";
-          import { dirname, join } from "node:path";
-          const require = createRequire(`${process.env.APVG_PACKAGE_ROOT}/package.json`);
-          console.log(join(dirname(require.resolve("playwright/package.json")), "cli.js"));
-        ')
-        node "$playwright_cli" install --with-deps chromium
-
-    - name: Install FFmpeg
-      shell: bash
-      run: |
-        if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; then
-          sudo apt-get update
-          sudo apt-get install --yes ffmpeg
-        fi
-        echo "FFMPEG_PATH=$(command -v ffmpeg)" >> "$GITHUB_ENV"
-        echo "FFPROBE_PATH=$(command -v ffprobe)" >> "$GITHUB_ENV"
+      run: npm exec --prefix "$APVG_PACKAGE_ROOT" -- playwright install --with-deps chromium
 
     - name: Install Ollama
       shell: bash
@@ -137,13 +179,19 @@ runs:
           curl -fsSL https://ollama.com/install.sh | sh
         fi
 
+    - name: Cache Ollama model
+      if: inputs['cache-enabled'] == 'true'
+      uses: actions/cache@v6
+      with:
+        path: ~/.ollama/models
+        key: ollama-${{ runner.os }}-${{ runner.arch }}-${{ inputs['ollama-model'] }}
+
     - name: Start Ollama
       shell: bash
       run: |
-        echo "OLLAMA_HOST=http://127.0.0.1:11434" >> "$GITHUB_ENV"
         nohup ollama serve > "$APVG_RUN_DIR/ollama.log" 2>&1 &
         for attempt in $(seq 1 60); do
-          curl -fsS http://127.0.0.1:11434/api/tags >/dev/null && exit 0
+          curl -fsS "$OLLAMA_HOST/api/tags" >/dev/null && exit 0
           [[ "$attempt" -lt 60 ]] || {
             echo "::error::Ollama did not become ready"
             exit 1
@@ -155,7 +203,6 @@ runs:
       shell: bash
       env:
         OLLAMA_MODEL: ${{ inputs['ollama-model'] }}
-        OLLAMA_HOST: http://127.0.0.1:11434
         OLLAMA_NUM_PARALLEL: '1'
       run: ollama pull "$OLLAMA_MODEL"
 
@@ -190,6 +237,125 @@ runs:
       shell: bash
       run: apvg project analyze --config "$APVG_CONFIG"
 
+    - name: Read analyzed project type
+      id: analyzed-project
+      shell: bash
+      env:
+        UNITY_VERSION_OVERRIDE: ${{ inputs['unity-version'] }}
+      run: node "${{ github.action_path }}/.github/automation/export-analyzed-project.mjs"
+
+    - name: Set up Android SDK
+      if: steps.analyzed-project.outputs.platform == 'android'
+      uses: android-actions/setup-android@v4
+
+    - name: Prepare Android runtime
+      if: steps.analyzed-project.outputs.platform == 'android'
+      id: android-cache
+      shell: bash
+      run: |
+        echo "ANDROID_AVD_HOME=$RUNNER_TEMP/apvg-android-avd" >> "$GITHUB_ENV"
+        echo "generation=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"
+        echo "sdk-root=$ANDROID_SDK_ROOT" >> "$GITHUB_OUTPUT"
+
+    - name: Cache Android SDK and emulator
+      if: steps.analyzed-project.outputs.platform == 'android' && inputs['cache-enabled'] == 'true'
+      uses: actions/cache@v6
+      with:
+        path: |
+          ${{ steps.android-cache.outputs.sdk-root }}/cmdline-tools
+          ${{ steps.android-cache.outputs.sdk-root }}/licenses
+          ${{ steps.android-cache.outputs.sdk-root }}/platform-tools
+          ${{ steps.android-cache.outputs.sdk-root }}/emulator
+          ${{ steps.android-cache.outputs.sdk-root }}/system-images
+          ${{ runner.temp }}/apvg-android-avd
+        key: android-emulator-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.android-cache.outputs.generation }}
+
+    - name: Validate Unity license credentials
+      if: steps.analyzed-project.outputs.platform == 'unity'
+      shell: bash
+      env:
+        UNITY_EMAIL: ${{ inputs['unity-email'] }}
+        UNITY_PASSWORD: ${{ inputs['unity-password'] }}
+      run: |
+        [[ -n "$UNITY_EMAIL" && -n "$UNITY_PASSWORD" ]] || {
+          echo "::error::unity-email and unity-password are required when the analyzed project is Unity"
+          exit 1
+        }
+
+    - name: Cache Unity Hub package
+      if: steps.analyzed-project.outputs.platform == 'unity' && inputs['cache-enabled'] == 'true'
+      uses: actions/cache@v6
+      with:
+        path: ${{ runner.temp }}/apvg-unity-hub
+        key: unity-hub-${{ runner.os }}-${{ runner.arch }}-${{ inputs['unity-hub-version'] }}
+
+    - name: Install system dependencies
+      shell: bash
+      env:
+        UNITY_HUB_VERSION: ${{ inputs['unity-hub-version'] }}
+        PROJECT_PLATFORM: ${{ steps.analyzed-project.outputs.platform }}
+      run: |
+        packages=(ffmpeg)
+        if [[ "$PROJECT_PLATFORM" == unity ]]; then
+          wget -qO - https://hub.unity3d.com/linux/keys/public |
+            gpg --dearmor |
+            sudo tee /usr/share/keyrings/Unity_Technologies_ApS.gpg >/dev/null
+          echo "deb [signed-by=/usr/share/keyrings/Unity_Technologies_ApS.gpg] https://hub.unity3d.com/linux/repos/deb stable main" |
+            sudo tee /etc/apt/sources.list.d/unityhub.list >/dev/null
+          packages+=(xvfb x11-utils libgl1-mesa-dri libglu1-mesa)
+        fi
+        sudo apt-get update
+        if [[ "$PROJECT_PLATFORM" == unity ]]; then
+          hub_cache="$RUNNER_TEMP/apvg-unity-hub"
+          mkdir -p "$hub_cache"
+          hub_deb="$(find "$hub_cache" -maxdepth 1 -name 'unityhub_*.deb' -print -quit)"
+          if [[ -z "$hub_deb" ]]; then
+            (cd "$hub_cache" && apt-get download "unityhub=$UNITY_HUB_VERSION")
+            hub_deb="$(find "$hub_cache" -maxdepth 1 -name 'unityhub_*.deb' -print -quit)"
+          fi
+          packages+=("$hub_deb")
+        fi
+        sudo apt-get install --yes "${packages[@]}"
+        echo "FFMPEG_PATH=$(command -v ffmpeg)" >> "$GITHUB_ENV"
+        echo "FFPROBE_PATH=$(command -v ffprobe)" >> "$GITHUB_ENV"
+        if [[ "$PROJECT_PLATFORM" == android ]]; then
+          mkdir -p "$ANDROID_AVD_HOME"
+          [[ ! -e /dev/kvm ]] || sudo chmod a+rw /dev/kvm
+        fi
+        if [[ "$PROJECT_PLATFORM" == unity ]]; then
+          hub_path="$(readlink -f "$(command -v unityhub)")"
+          printf '#!/bin/bash\nexec xvfb-run --auto-servernum "%s" "$@"\n' "$hub_path" |
+            sudo tee /usr/bin/unity-hub >/dev/null
+          sudo chmod +x /usr/bin/unity-hub
+          echo "UNITY_HUB_PATH=$hub_path" >> "$GITHUB_ENV"
+          Xvfb :100 -screen 0 1920x1080x24 > "$APVG_RUN_DIR/xvfb.log" 2>&1 &
+          echo "DISPLAY=:100" >> "$GITHUB_ENV"
+          echo "LIBGL_ALWAYS_SOFTWARE=1" >> "$GITHUB_ENV"
+          for attempt in $(seq 1 30); do
+            DISPLAY=:100 xdpyinfo >/dev/null 2>&1 && break
+            [[ "$attempt" -lt 30 ]] || exit 1
+            sleep 1
+          done
+        fi
+
+    - name: Set up Unity Editor
+      if: steps.analyzed-project.outputs.platform == 'unity'
+      uses: buildalon/unity-setup@v2
+      with:
+        version-file: ${{ steps.analyzed-project.outputs.unity-version-file }}
+        unity-version: ${{ steps.analyzed-project.outputs.unity-version }}
+        build-targets: StandaloneLinux64
+        hub-version: ${{ inputs['unity-hub-version'] }}
+        cache-installation: ${{ inputs['cache-enabled'] }}
+
+    - name: Activate Unity Personal license
+      if: steps.analyzed-project.outputs.platform == 'unity'
+      uses: buildalon/activate-unity-license@v2
+      with:
+        license: Personal
+        username: ${{ inputs['unity-email'] }}
+        password: ${{ inputs['unity-password'] }}
+
     - name: Generate recording scenario
       shell: bash
       run: apvg video scenario generate --config "$APVG_CONFIG"
@@ -205,11 +371,11 @@ runs:
       env:
         VOICEVOX_IMAGE: ${{ inputs['voicevox-image'] }}
       run: |
-        docker run -d --rm --name apvg-voicevox-action -p 50021:50021 "$VOICEVOX_IMAGE"
+        docker run -d --rm --name "$VOICEVOX_CONTAINER" -p "$VOICEVOX_PORT:$VOICEVOX_PORT" "$VOICEVOX_IMAGE"
         for attempt in $(seq 1 90); do
-          curl -fsS http://127.0.0.1:50021/version >/dev/null && exit 0
+          curl -fsS "$VOICEVOX_HOST/version" >/dev/null && exit 0
           [[ "$attempt" -lt 90 ]] || {
-            docker logs apvg-voicevox-action || true
+            docker logs "$VOICEVOX_CONTAINER" || true
             echo "::error::VOICEVOX Engine did not become ready"
             exit 1
           }
@@ -233,6 +399,11 @@ runs:
         [[ "$PREVIEW" != "true" ]] || args+=(--preview)
         apvg "${args[@]}"
 
+    - name: Export editable Remotion project
+      if: inputs.export-remotion == 'true'
+      shell: bash
+      run: apvg video export remotion --config "$APVG_CONFIG"
+
     - name: Set action outputs
       id: result
       shell: bash
@@ -244,8 +415,18 @@ runs:
         }
         echo "video-path=$video_path" >> "$GITHUB_OUTPUT"
         echo "artifacts-path=$APVG_OUTPUT_DIR" >> "$GITHUB_OUTPUT"
+        remotion_path=""
+        if [[ "${{ inputs['export-remotion'] }}" == "true" ]]; then
+          remotion_path="$APVG_OUTPUT_DIR/remotion-project"
+          [[ -f "$remotion_path/package.json" ]] || {
+            echo "::error::Expected Remotion project was not created: $remotion_path"
+            exit 1
+          }
+        fi
+        echo "remotion-project-path=$remotion_path" >> "$GITHUB_OUTPUT"
         echo "### Auto Product Video Generator" >> "$GITHUB_STEP_SUMMARY"
         echo "Generated: \`$video_path\`" >> "$GITHUB_STEP_SUMMARY"
+        [[ -z "$remotion_path" ]] || echo "Remotion project: \`$remotion_path\`" >> "$GITHUB_STEP_SUMMARY"
 
     - name: Stop managed services
       if: always()
@@ -253,5 +434,5 @@ runs:
       env:
         OLLAMA_MODEL: ${{ inputs['ollama-model'] }}
       run: |
-        docker rm -f apvg-voicevox-action >/dev/null 2>&1 || true
+        docker rm -f "$VOICEVOX_CONTAINER" >/dev/null 2>&1 || true
         command -v ollama >/dev/null 2>&1 && ollama stop "$OLLAMA_MODEL" >/dev/null 2>&1 || true

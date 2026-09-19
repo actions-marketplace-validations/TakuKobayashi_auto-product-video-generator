@@ -8,7 +8,10 @@ import {
   ScenarioSchema,
   ScriptSchema,
 } from '@auto-product-video-generator/core';
-import { createPlatformRecorder } from '@auto-product-video-generator/recorder';
+import {
+  captureSceneScreenshot,
+  createPlatformRecorder,
+} from '@auto-product-video-generator/recorder';
 import {
   resolveProjectSource,
   ensureAppRunning,
@@ -17,6 +20,7 @@ import {
   placeProjectEnvironmentFile,
 } from '@auto-product-video-generator/source';
 import { resolveWebStorageState } from '../utils/web-auth.js';
+import { applyResolvedConfig } from '../utils/resolved-config.js';
 
 interface RecordOptions {
   config?: string;
@@ -32,13 +36,14 @@ interface RecordOptions {
   headed?: boolean;
   slowMo?: string;
   dryRun?: boolean;
+  screenshots?: boolean;
 }
 
 export async function runRecord(options: RecordOptions): Promise<void> {
   logger.header('apvg video record');
 
   const configPath = options.config || 'apvg.config.yml';
-  const config = await loadConfig(configPath);
+  const config = await applyResolvedConfig(await loadConfig(configPath));
 
   const workDir = config.output.workDir;
   const scenarioPath = options.scenario || join(workDir, 'scenario.yml');
@@ -141,11 +146,21 @@ export async function runRecord(options: RecordOptions): Promise<void> {
           outputDir: recordingsDir,
           screenshotDir,
           dryRun: options.dryRun || false,
+          sceneIndex: scenario.scenes.findIndex((item) => item.id === scene.id),
           storageStatePath,
         },
         targetDurationSeconds,
         scriptScene.endTime - scriptScene.startTime
       );
+    }
+    await recorder.finalize?.();
+    if (!options.dryRun && options.screenshots !== false && config.video.screenshots) {
+      for (const scene of scenesToRecord) {
+        await captureSceneScreenshot(
+          join(recordingsDir, `scene-${scene.id}.mp4`),
+          join(screenshotDir, `scene-${scene.id}.png`)
+        );
+      }
     }
   } finally {
     await recorder.dispose?.();

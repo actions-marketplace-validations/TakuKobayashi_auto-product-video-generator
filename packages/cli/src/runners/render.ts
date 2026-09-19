@@ -78,7 +78,7 @@ export async function runRender(options: RenderOptions): Promise<void> {
   await writeJson(timelinePath, timeline);
   logger.success(`Built: ${timelinePath}`);
 
-  const noSubtitles = options.subtitles === false;
+  const noSubtitles = options.subtitles === false || !config.video.subtitles;
   const noVoice = options.voice === false;
 
   const ffmpegPath = resolveFfmpegPath(options.ffmpeg);

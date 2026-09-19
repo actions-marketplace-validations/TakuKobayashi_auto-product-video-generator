@@ -130,7 +130,6 @@ export const SCENARIO_OUTPUT_SCHEMA: JsonSchema = {
     scenes: {
       type: 'array',
       minItems: 1,
-      maxItems: 5,
       items: {
         type: 'object',
         additionalProperties: false,
@@ -139,6 +138,16 @@ export const SCENARIO_OUTPUT_SCHEMA: JsonSchema = {
           id: { type: 'string', minLength: 1 },
           title: { type: 'string', minLength: 1 },
           narration: { type: 'string', minLength: 1 },
+          emotion: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['j', 's', 'a'],
+            properties: {
+              j: { type: 'number', minimum: 0, maximum: 1 },
+              s: { type: 'number', minimum: 0, maximum: 1 },
+              a: { type: 'number', minimum: 0, maximum: 1 },
+            },
+          },
           actions: { type: 'array', items: action },
         },
       },
